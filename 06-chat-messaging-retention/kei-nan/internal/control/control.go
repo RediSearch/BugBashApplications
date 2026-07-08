@@ -13,9 +13,11 @@ import (
 
 // Control is the shared, live-updatable query configuration.
 type Control struct {
-	queryRate atomic.Int64 // queries/sec target (0 = unlimited)
-	timeoutMs atomic.Int64 // per-query TIMEOUT ms (0 = server default)
-	limit     atomic.Int64 // FT.SEARCH LIMIT count
+	queryRate   atomic.Int64 // queries/sec target (0 = unlimited)
+	timeoutMs   atomic.Int64 // per-query TIMEOUT ms (0 = server default)
+	limit       atomic.Int64 // FT.SEARCH LIMIT count
+	concurrency atomic.Int64 // number of query worker threads/connections
+	maxWorkers  int          // hard cap on concurrency (immutable; sizes the conn pool)
 
 	mu          sync.RWMutex
 	profiles    []config.QueryProfile
@@ -24,13 +26,30 @@ type Control struct {
 
 // New initializes control from the config.
 func New(cfg *config.Config) *Control {
-	c := &Control{}
+	c := &Control{maxWorkers: cfg.Query.MaxWorkers}
 	c.queryRate.Store(int64(cfg.Query.Rate))
 	c.timeoutMs.Store(0)
 	c.limit.Store(int64(cfg.Query.Limit))
+	c.concurrency.Store(int64(cfg.Query.Workers))
 	c.SetProfiles(cfg.Query.Profiles)
 	return c
 }
+
+// Concurrency / SetConcurrency — number of query worker threads (clamped to
+// [1, maxWorkers]). Increasing it drives more load across more connections.
+func (c *Control) Concurrency() int { return int(c.concurrency.Load()) }
+func (c *Control) SetConcurrency(v int) {
+	if v < 1 {
+		v = 1
+	}
+	if v > c.maxWorkers {
+		v = c.maxWorkers
+	}
+	c.concurrency.Store(int64(v))
+}
+
+// MaxWorkers is the hard concurrency cap.
+func (c *Control) MaxWorkers() int { return c.maxWorkers }
 
 // QueryRate / SetQueryRate — target queries per second (0 = unlimited).
 func (c *Control) QueryRate() int { return int(c.queryRate.Load()) }

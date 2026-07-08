@@ -78,12 +78,13 @@ type Config struct {
 	} `yaml:"ingest"`
 
 	Query struct {
-		Workers   int            `yaml:"workers"`
-		Rate      int            `yaml:"rate"`
-		Limit     int            `yaml:"limit"`
-		PageDepth int            `yaml:"page_depth"` // max offset for the deep-pagination profile
-		SlowMs    int            `yaml:"slow_ms"`    // a query at/above this latency counts as "slow" (timeout-risk)
-		Profiles  []QueryProfile `yaml:"profiles"`   // the high-level query mix
+		Workers    int            `yaml:"workers"`     // initial query concurrency (threads/connections)
+		MaxWorkers int            `yaml:"max_workers"` // upper bound for live concurrency (sizes the conn pool)
+		Rate       int            `yaml:"rate"`        // aggregate queries/sec target (0 = unbounded)
+		Limit      int            `yaml:"limit"`
+		PageDepth  int            `yaml:"page_depth"` // max offset for the deep-pagination profile
+		SlowMs     int            `yaml:"slow_ms"`    // a query at/above this latency counts as "slow" (timeout-risk)
+		Profiles   []QueryProfile `yaml:"profiles"`   // the high-level query mix
 	} `yaml:"query"`
 
 	Edit    struct{ Rate int } `yaml:"edit"`
@@ -134,7 +135,7 @@ func Default() *Config {
 		OutDir:            "./out",
 	}
 	c.Ingest.Workers, c.Ingest.Rate, c.Ingest.Pipeline = 4, 2000, 200
-	c.Query.Workers, c.Query.Rate, c.Query.Limit = 4, 200, 20
+	c.Query.Workers, c.Query.MaxWorkers, c.Query.Rate, c.Query.Limit = 4, 64, 200, 20
 	c.Query.PageDepth, c.Query.SlowMs = 2000, 500
 	c.Query.Profiles = []QueryProfile{
 		{Name: "channel_search", Weight: 45},
@@ -214,6 +215,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Query.PageDepth < 0 {
 		c.Query.PageDepth = 0
+	}
+	if c.Query.Workers < 1 {
+		c.Query.Workers = 1
+	}
+	if c.Query.MaxWorkers < c.Query.Workers {
+		c.Query.MaxWorkers = c.Query.Workers
 	}
 	return nil
 }

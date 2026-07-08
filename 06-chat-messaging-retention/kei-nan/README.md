@@ -110,8 +110,9 @@ from the dashboard**). Each targets a disk pattern / weak-point:
 
 Other workers: sliding-TTL refresher (`PEXPIRE`), editor (`HSET body`, re-index),
 deleter (`UNLINK`, de-index). Ingest/edit/delete rates come from the config; the
-**query rate, per-query `TIMEOUT`, result `LIMIT`, and profile mix are live-tunable
-from the UI**.
+**query thread-concurrency, rate, per-query `TIMEOUT`, result `LIMIT`, and profile
+mix are all live-tunable from the UI** (a supervisor spawns/stops query workers to
+match the live thread count, so you can dial load up and down without a restart).
 
 ### Disk weak-points this exercises
 
@@ -130,20 +131,52 @@ from the UI**.
 
 ## Web dashboard
 
-- **High-level KPIs:** messages retained, ingesting/s, expiring/s, footprint (+
-  plateau badge), stale results (correctness), query p99, slow queries, recall.
+All panels are **collapsible** (click the header). Charts show a **hover tooltip**
+with the timestamp and each series' value.
+
+- **High-level KPIs** (hover any tile for an explanation): messages retained,
+  ingesting/s, expiring/s, footprint (+ plateau badge), stale results
+  (correctness), query p99, slow queries, recall.
+- **Query load** — the single place to drive query traffic:
+  - *Query types:* toggle each profile on/off and set its relative weight, or hit
+    **🎲 Randomize types** to randomize the mix. This is the "control or
+    randomization of the type of queries" knob.
+  - *Load:* **threads** (live query concurrency — more threads = more concurrent
+    connections = more load, up to `max_workers`) and **rate q/s** (0 = max). Also
+    per-query **timeout** and result **limit**. **Apply** pushes changes to the
+    running workload instantly — no restart.
 - **Live conversations:** browse channels; messages fetched live via `FT.SEARCH`
-  + `HGETALL` with TTL countdowns.
+  + `HGETALL` with TTL countdowns, plus an inline text filter (scoped search).
 - **Index status (FT.INFO):** `num_docs`, `num_records`, `inverted_sz_mb`,
   `doc_table_size_mb`, `total_index_memory_sz_mb`, `hash_indexing_failures`,
   `indexing`, `percent_indexed`, GC/cleaning — plus disk `INFO`
   (`search_disk_usage`, `async_reads_expired`, compaction). Placeholder-on-Flex
   fields (offset/key-table sizes, etc.) are intentionally omitted.
-- **Query controls:** rate / timeout / limit + the profile-weight mix, applied live.
-- **Ad-hoc queries:** pick a count and profiles, **Randomize** to generate editable
-  `FT.SEARCH` query bodies, edit them, and **Send** them to the cluster to see
-  per-query total / latency / key count / errors.
 - **Charts:** footprint over time, docs vs records, ingest & expire /s, query p50/p99.
+
+The charts are drawn from an **in-process time-series** the harness samples from
+`INFO`/`FT.INFO` — it does **not** use RedisTimeSeries (`TS.*`), which isn't part
+of the disk-search surface.
+
+> `/api/control` (GET/POST), `/api/gen-queries`, `/api/run-queries` are also
+> exposed for scripting the workload from the CLI.
+
+### Reading "stale hits" — the headline correctness signal
+
+A **stale hit** is a query result that should not exist: a message that had already
+**expired** (its TTL elapsed) or been **deleted** *before* the query ran, yet still
+appeared in the results. On-disk indexes don't physically remove a message's
+postings the instant its key expires (that happens later via GC/compaction) — the
+guarantee is that they're **filtered at query time** in the meantime. `stale_hits`
+counts violations of that guarantee:
+
+- **0** — correct: expired/deleted docs are hidden at read time. Expected on the
+  disk build.
+- **> 0** — the index is returning expired content (a retention/privacy bug worth a
+  ticket). Stock OSS/in-RAM RediSearch (Redis Stack) shows many under churn.
+
+Measured with a `t0`-before-query rule against a client oracle, plus a probe that
+searches for known-expired docs and asserts they're absent (see below).
 
 ## What to watch
 

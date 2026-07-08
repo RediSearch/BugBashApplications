@@ -375,18 +375,21 @@ type profileView struct {
 }
 
 type controlResp struct {
-	Rate      int           `json:"rate"`
-	TimeoutMs int           `json:"timeout_ms"`
-	Limit     int           `json:"limit"`
-	PageDepth int           `json:"page_depth"`
-	Profiles  []profileView `json:"profiles"`
+	Rate        int           `json:"rate"`
+	TimeoutMs   int           `json:"timeout_ms"`
+	Limit       int           `json:"limit"`
+	Concurrency int           `json:"concurrency"`
+	MaxWorkers  int           `json:"max_workers"`
+	PageDepth   int           `json:"page_depth"`
+	Profiles    []profileView `json:"profiles"`
 }
 
 type controlReq struct {
-	Rate      *int `json:"rate"`
-	TimeoutMs *int `json:"timeout_ms"`
-	Limit     *int `json:"limit"`
-	Profiles  []struct {
+	Rate        *int `json:"rate"`
+	TimeoutMs   *int `json:"timeout_ms"`
+	Limit       *int `json:"limit"`
+	Concurrency *int `json:"concurrency"`
+	Profiles    []struct {
 		Name   string `json:"name"`
 		Weight int    `json:"weight"`
 	} `json:"profiles"`
@@ -407,6 +410,9 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Limit != nil {
 			s.ctrl.SetLimit(*req.Limit)
+		}
+		if req.Concurrency != nil {
+			s.ctrl.SetConcurrency(*req.Concurrency)
 		}
 		if len(req.Profiles) > 0 {
 			ps := make([]config.QueryProfile, 0, len(req.Profiles))
@@ -439,6 +445,7 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 	})
 	writeJSON(w, controlResp{
 		Rate: s.ctrl.QueryRate(), TimeoutMs: s.ctrl.TimeoutMs(), Limit: s.ctrl.Limit(),
+		Concurrency: s.ctrl.Concurrency(), MaxWorkers: s.ctrl.MaxWorkers(),
 		PageDepth: s.cfg.Query.PageDepth, Profiles: out,
 	})
 }

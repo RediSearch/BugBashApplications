@@ -66,11 +66,11 @@ func (r *Runner) Run(ctx context.Context) {
 		wg.Add(1)
 		go func(id int) { defer wg.Done(); r.ingester(ctx, id, ingestLim) }(i)
 	}
-	// Query workers self-pace from live control (rate is tunable at runtime).
-	for i := 0; i < r.cfg.Query.Workers; i++ {
-		wg.Add(1)
-		go func(id int) { defer wg.Done(); r.queryer(ctx, id) }(i)
-	}
+	// A supervisor spawns/stops query workers to match the live concurrency
+	// (threads) set from the UI; each self-paces to the live rate.
+	wg.Add(1)
+	go func() { defer wg.Done(); r.querySupervisor(ctx) }()
+
 	wg.Add(3)
 	go func() { defer wg.Done(); r.editor(ctx, editLim) }()
 	go func() { defer wg.Done(); r.deleter(ctx, delLim) }()
@@ -147,18 +147,61 @@ func (r *Runner) ingester(ctx context.Context, id int, lim *Limiter) {
 	}
 }
 
+// querySupervisor keeps the number of live query workers equal to the control's
+// concurrency setting, spawning new workers or cancelling extras as it changes.
+func (r *Runner) querySupervisor(ctx context.Context) {
+	var workers []context.CancelFunc
+	var wwg sync.WaitGroup
+	nextID := 0
+
+	spawn := func() {
+		wctx, cancel := context.WithCancel(ctx)
+		workers = append(workers, cancel)
+		id := nextID
+		nextID++
+		wwg.Add(1)
+		go func() { defer wwg.Done(); r.queryer(wctx, id) }()
+	}
+	shrink := func() {
+		last := len(workers) - 1
+		workers[last]() // cancel
+		workers = workers[:last]
+	}
+	adjust := func() {
+		target := r.ctrl.Concurrency()
+		for len(workers) < target {
+			spawn()
+		}
+		for len(workers) > target {
+			shrink()
+		}
+	}
+
+	adjust()
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			wwg.Wait() // workers observe ctx cancellation
+			return
+		case <-tick.C:
+			adjust()
+		}
+	}
+}
+
 func (r *Runner) queryer(ctx context.Context, id int) {
 	rnd := rand.New(rand.NewSource(r.cfg.Seed*53 + int64(id)*17 + 3))
 	pick := model.NewPicker(r.space, r.cfg.Seed, int64(id)*29+7)
 	gen := gendata.New(r.cfg.Seed, int64(id)*71+11, r.cfg.Body.MinWords, r.cfg.Body.MaxWords, 0)
 	slowMs := r.cfg.Query.SlowMs
-	workers := r.cfg.Query.Workers
 	iter := 0
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		r.paceQuery(ctx, workers)
+		r.paceQuery(ctx)
 		iter++
 
 		prof := r.ctrl.PickProfile(rnd.Int())
@@ -195,10 +238,12 @@ func (r *Runner) queryer(ctx context.Context, id int) {
 	}
 }
 
-// paceQuery self-throttles a query worker to (liveRate / workers) qps, reading
-// the live rate each call so the UI can change it at runtime. rate <= 0 = unlimited.
-func (r *Runner) paceQuery(ctx context.Context, workers int) {
+// paceQuery self-throttles a query worker to (liveRate / liveConcurrency) qps,
+// reading both live so the UI can change rate and thread count at runtime.
+// rate <= 0 means unlimited (load is then bounded only by the thread count).
+func (r *Runner) paceQuery(ctx context.Context) {
 	rate := r.ctrl.QueryRate()
+	workers := r.ctrl.Concurrency()
 	if rate <= 0 || workers <= 0 {
 		return
 	}
