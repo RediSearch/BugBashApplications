@@ -1,0 +1,78 @@
+# Large disk run: point -addr at a Flex/BigRedis (disk-index-capable) server
+# configured per deploy/flex-redis.conf. Size the dataset so total bytes exceed
+# the server's RAM budget (bigredis-max-ram) — that's the whole point of on-disk
+# indexes. Tune tenants/rates/TTLs to your box; the defaults below sustain a
+# heavy continuous ingest+expiry churn for an hour.
+addr: 127.0.0.1:6379
+index: chat
+prefix: "msg:"
+duration: 60m
+seed: 42
+
+# Large id space => billions-of-messages shape, high-cardinality TAG posting lists.
+tenants: 5000
+channels_per_tenant: 200
+users_per_tenant: 2000
+threads_per_channel: 50
+
+ingest:
+  workers: 32
+  rate: 0            # 0 = unbounded (push as hard as the client/server allow)
+  pipeline: 500
+
+query:
+  workers: 16
+  rate: 2000         # tunable live from the UI
+  limit: 50
+  page_depth: 100000 # deep offsets to probe the large-offset / OOM guardrail
+  slow_ms: 500       # matches the default server query timeout
+  # "fuzz" emits fully-randomized disk-legal queries; the rest target weak-points.
+  # Tunable live in the UI; set fuzz to 100 (others 0) for pure random queries.
+  profiles:
+    - { name: channel_search,  weight: 25 }
+    - { name: thread_search,   weight: 10 }
+    - { name: tag_filter,      weight: 10 }
+    - { name: recent_timeline, weight: 10 }
+    - { name: plan_analytics,  weight: 10 }  # wide GROUPBY over ~1M channels
+    - { name: deep_pagination, weight: 10 }
+    - { name: text_prefix,     weight: 5 }
+    - { name: fuzz,            weight: 20 }
+
+edit:    { rate: 500 }
+delete:  { rate: 500 }
+sliding: { rate: 1000 }
+
+# vocab_high sprinkles synthetic unique-ish terms into bodies to grow the on-disk
+# TEXT term dictionary, which is PINNED IN RAM and scales with distinct-term count
+# (~100MB per 1M terms) — a key Flex weak-point. 0 disables it.
+body: { min_words: 8, max_words: 60, vocab_high: 5000000 }
+
+# Coexisting short- and long-lived retention tiers. At steady state the live set
+# ~= ingest_rate * (weighted-avg TTL); expire-rate converges on ingest-rate and
+# on-disk footprint should PLATEAU rather than grow without bound.
+#
+# IMPORTANT: the footprint only plateaus once EVERY tier has cycled at least once,
+# so the max TTL here is kept well under `duration` (60m). For a longer soak with
+# longer retention (hours/days), raise `duration` to >= 2x the max TTL — otherwise
+# the long tiers never expire and the plateau verdict will always read GROWING.
+tiers:
+  - { name: disappearing, weight: 30, ttl: 1m }
+  - { name: free,         weight: 40, ttl: 5m }
+  - { name: pro,          weight: 20, ttl: 15m }
+  - { name: enterprise,   weight: 10, ttl: 25m }
+
+sample:
+  interval: 5s
+  gc_interval: 60s
+  force_gc: true
+
+oracle:
+  sample_rate: 0.02   # track 2% of messages for the no-stale-hits check (bounds client RAM)
+  max_tracked: 4000000
+  grace_ms: 3000
+
+web:
+  enabled: true
+  addr: ":8080"
+
+out_dir: ./out

@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>chatstress — Redis Search on Disk (MS2)</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">▚</span>
+      <div>
+        <h1>chatstress</h1>
+        <div class="sub" id="cfg-sub">use-case 6 · chat / messaging with retention</div>
+      </div>
+    </div>
+    <div class="badges">
+      <span class="badge" id="badge-mode">mode …</span>
+      <span class="badge" id="badge-correct">correctness …</span>
+      <span class="badge" id="badge-plateau">footprint …</span>
+      <span class="badge warn" id="badge-paused" style="display:none">⏸ PAUSED</span>
+      <span class="badge ghost" id="badge-elapsed">t=0s</span>
+      <button id="c-noexpire" class="topbtn" title="toggle whether NEW documents are written with a TTL; off = persistent docs">🕒 TTL: on</button>
+      <button id="c-pause" class="topbtn" title="pause/resume the whole workload (ingest, mutations and queries)">⏸ Pause</button>
+    </div>
+  </header>
+
+  <section class="kpis" id="kpis"></section>
+
+  <main class="grid">
+    <!-- Query load generator (type control + concurrency) -->
+    <section class="panel span2" id="p-load">
+      <div class="panel-head" data-collapse>
+        <h2>Query load</h2>
+        <span class="hint">the N threads continuously run a fixed random set of queries — Randomize re-rolls that set; changing types/limit + Apply rebuilds it</span>
+        <span class="chevron">▾</span>
+      </div>
+      <div class="panel-body">
+        <div class="load-row">
+          <label>threads<input id="c-conc" type="number" min="1" step="1" /><small id="c-conc-max"></small></label>
+          <label>rate q/s<input id="c-rate" type="number" min="0" step="50" /><small>0 = max</small></label>
+          <label>timeout ms<input id="c-timeout" type="number" min="0" step="50" /><small>0 = default</small></label>
+          <label>limit<input id="c-limit" type="number" min="1" step="10" /><small>rows/query</small></label>
+        </div>
+        <div class="hint" style="margin-bottom:6px">threads drive load only up to <b>rate</b> — set rate to <b>0</b> for threads to push max throughput. limit/timeout are baked into the query set on Apply (visible below).</div>
+        <div class="mix-head">Query types <span class="hint">toggle on/off · weight = probability · the <b>fuzz</b> type emits fully-randomized FT.SEARCH/FT.AGGREGATE · counts update live</span></div>
+        <div class="mix" id="mix"></div>
+        <div class="apply-row">
+          <span class="hint">applies the settings + enabled types above and rebuilds the query set</span>
+          <button id="c-apply" class="primary" title="apply threads/rate/timeout/limit and the enabled query types">Apply settings &amp; types</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Index status -->
+    <section class="panel" id="p-index">
+      <div class="panel-head" data-collapse><h2>Index status</h2><span class="hint">FT.INFO</span><span class="chevron">▾</span></div>
+      <div class="panel-body"><div class="status" id="index-status"><div class="muted">waiting for first sample…</div></div></div>
+    </section>
+
+    <!-- Generated query set (what the threads run right now) -->
+    <section class="panel span3" id="p-genset">
+      <div class="panel-head" data-collapse>
+        <h2>Generated query set</h2>
+        <span class="hint" id="genset-hint">the exact random queries the threads are running — note the LOAD / APPLY / GROUPBY variety</span>
+        <div class="setctl" id="setctl">
+          <label class="autolbl" title="re-roll the query set automatically on an interval">
+            <input type="checkbox" id="c-auto" /> auto <input type="number" id="c-auto-int" value="10" min="2" step="1" /> s
+          </label>
+          <button id="c-refresh" title="re-roll the random query set now">🔄 Refresh</button>
+        </div>
+        <span class="chevron">▾</span>
+      </div>
+      <div class="panel-body"><div class="genset" id="genset"><div class="muted">…</div></div></div>
+    </section>
+
+    <!-- Conversations + inline inspect search -->
+    <section class="panel span2" id="p-conv">
+      <div class="panel-head" data-collapse>
+        <h2>Live conversations</h2>
+        <span class="hint">live from the index (FT.SEARCH + HGETALL) — TTLs count down &amp; expire</span>
+        <span class="chevron">▾</span>
+      </div>
+      <div class="panel-body">
+        <div class="inspect">
+          <input id="s-text" placeholder="filter selected channel by text (e.g. deploy) — Enter to search" />
+          <button id="s-run">Search</button>
+          <button id="s-clear" title="show recent messages">Recent</button>
+        </div>
+        <div class="query" id="s-query"></div>
+        <div class="conv">
+          <div class="channels" id="channels"><div class="muted">loading channels…</div></div>
+          <div class="messages" id="messages"><div class="muted">pick a channel</div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Charts -->
+    <section class="panel span3" id="p-charts">
+      <div class="panel-head" data-collapse><h2>Database stats</h2><span class="hint" id="verdict-note"></span><span class="chevron">▾</span></div>
+      <div class="panel-body">
+        <div class="charts">
+          <figure><figcaption id="cap-foot">on-disk footprint</figcaption><canvas id="c-foot" height="170"></canvas></figure>
+          <figure><figcaption>indexed docs vs records</figcaption><canvas id="c-docs" height="170"></canvas></figure>
+          <figure><figcaption>ingest &amp; expire /s</figcaption><canvas id="c-rate2" height="170"></canvas></figure>
+          <figure><figcaption>query latency p50 / p99 (ms)</figcaption><canvas id="c-lat" height="170"></canvas></figure>
+        </div>
+      </div>
+    </section>
+    <!-- Live query feed (the actual randomized queries being sent) -->
+    <section class="panel span3" id="p-feed">
+      <div class="panel-head" data-collapse>
+        <h2>Live query feed</h2>
+        <span class="hint">a live sample of the actual randomized queries hitting the cluster (profile · command · matches · latency)</span>
+        <span class="chevron">▾</span>
+      </div>
+      <div class="panel-body">
+        <table class="feedtbl">
+          <thead><tr>
+            <th data-k="t" class="sortable">t (s)</th>
+            <th data-k="profile" class="sortable">type</th>
+            <th data-k="query" class="sortable">query</th>
+            <th data-k="total" class="sortable">matches</th>
+            <th data-k="ms" class="sortable">ms</th>
+          </tr></thead>
+          <tbody id="feedbody"><tr><td colspan="5" class="muted">waiting for queries…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot"><span id="tiers"></span></footer>
+  <div id="tooltip" class="tooltip"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

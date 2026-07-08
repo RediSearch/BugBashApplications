@@ -15,4 +15,4 @@ username, then build your app inside it.
 
 | Contributor | Notes |
 | ----------- | ----- |
-| _add yourself_ | |
+| [`kei-nan`](kei-nan/) | `chatstress` — Go harness: continuous ingest+TTL-expiry churn, sliding-TTL/edits/deletes, scoped full-text queries, a no-stale-hits correctness oracle, footprint-plateau analysis, `DEBUG RELOAD` check, and a live web dashboard (conversation browser + DB-stats charts). |
