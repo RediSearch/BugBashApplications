@@ -163,8 +163,13 @@ with the timestamp and each series' value.
     connections = more load, up to `max_workers`) and **rate q/s** (0 = max). Also
     per-query **timeout** and result **limit**. **Apply** pushes changes to the
     running workload instantly — no restart.
-  - **🎲 Randomize queries** fires an immediate burst of fully-randomized fuzz
-    queries at the cluster (they appear in the live feed below).
+  - The background threads continuously run a **pool** of concrete random queries
+    (composed from the enabled types). **🎲 Randomize queries** re-rolls that pool,
+    so the threads immediately start sending a fresh random set; changing the
+    types/limit + **Apply** also rebuilds it.
+  - **⏸ Pause / ▶ Resume** freezes/unfreezes the whole workload (ingest, mutations
+    and queries) so you can inspect a steady state — expiry still proceeds, so you
+    can watch the index drain.
 - **Live query feed:** a **sortable** table (click any column: time · type · query ·
   matches · latency) showing a rolling sample of the **actual randomized queries**
   being sent, so you can see the varied structure and, e.g., sort by latency to

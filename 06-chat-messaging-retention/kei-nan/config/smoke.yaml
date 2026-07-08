@@ -33,6 +33,7 @@ query:
     - { name: plan_analytics,  weight: 5 }    # FT.AGGREGATE wide GROUPBY (OOM weak-point)
     - { name: deep_pagination, weight: 5 }    # large LIMIT offset (OOM / large-offset)
     - { name: text_prefix,     weight: 5 }    # TEXT prefix expansion foo*
+    - { name: fuzz,            weight: 10 }   # fully-randomized disk-legal queries (broad fuzz)
 
 edit:   { rate: 50 }   # HSET body edits/sec (re-index)
 delete: { rate: 50 }   # UNLINK deletes/sec (de-index)

@@ -19,6 +19,7 @@
       <span class="badge" id="badge-mode">mode …</span>
       <span class="badge" id="badge-correct">correctness …</span>
       <span class="badge" id="badge-plateau">footprint …</span>
+      <span class="badge warn" id="badge-paused" style="display:none">⏸ PAUSED</span>
       <span class="badge ghost" id="badge-elapsed">t=0s</span>
     </div>
   </header>
@@ -30,7 +31,7 @@
     <section class="panel span2" id="p-load">
       <div class="panel-head" data-collapse>
         <h2>Query load</h2>
-        <span class="hint">enabled types drive an automatic, randomized query stream across N threads — see the live feed below</span>
+        <span class="hint">the N threads continuously run a fixed random set of queries — Randomize re-rolls that set; changing types/limit + Apply rebuilds it</span>
         <span class="chevron">▾</span>
       </div>
       <div class="panel-body">
@@ -40,7 +41,8 @@
           <label>timeout ms<input id="c-timeout" type="number" min="0" step="50" /><small>0 = default</small></label>
           <label>limit<input id="c-limit" type="number" min="1" step="10" /><small>rows/query</small></label>
           <div class="load-btns">
-            <button id="c-fuzz" title="fire a burst of fully-randomized, disk-legal queries at the cluster now">🎲 Randomize queries</button>
+            <button id="c-pause" title="pause/resume the whole workload (ingest, mutations and queries)">⏸ Pause</button>
+            <button id="c-randomize" title="re-roll the random set of queries the background threads are running">🎲 Randomize queries</button>
             <button id="c-apply" class="primary">Apply</button>
           </div>
         </div>

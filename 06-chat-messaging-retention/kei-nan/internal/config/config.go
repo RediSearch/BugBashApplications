@@ -85,6 +85,7 @@ type Config struct {
 		Limit      int            `yaml:"limit"`
 		PageDepth  int            `yaml:"page_depth"` // max offset for the deep-pagination profile
 		SlowMs     int            `yaml:"slow_ms"`    // a query at/above this latency counts as "slow" (timeout-risk)
+		PoolSize   int            `yaml:"pool_size"`  // number of concrete queries in the pool the workers run
 		Profiles   []QueryProfile `yaml:"profiles"`   // the high-level query mix
 	} `yaml:"query"`
 
@@ -137,7 +138,7 @@ func Default() *Config {
 	}
 	c.Ingest.Workers, c.Ingest.Rate, c.Ingest.Pipeline = 4, 2000, 200
 	c.Query.Workers, c.Query.MaxWorkers, c.Query.Rate, c.Query.Limit = 4, 64, 200, 20
-	c.Query.PageDepth, c.Query.SlowMs = 2000, 500
+	c.Query.PageDepth, c.Query.SlowMs, c.Query.PoolSize = 2000, 500, 64
 	c.Query.Profiles = []QueryProfile{
 		{Name: "channel_search", Weight: 45},
 		{Name: "thread_search", Weight: 15},
@@ -217,6 +218,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Query.PageDepth < 0 {
 		c.Query.PageDepth = 0
+	}
+	if c.Query.PoolSize < 1 {
+		c.Query.PoolSize = 64
 	}
 	if c.Query.Workers < 1 {
 		c.Query.Workers = 1

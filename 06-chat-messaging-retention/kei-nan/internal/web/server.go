@@ -23,11 +23,11 @@ import (
 
 	"chatstress/internal/config"
 	"chatstress/internal/control"
-	"chatstress/internal/fuzz"
 	"chatstress/internal/gendata"
 	"chatstress/internal/metrics"
 	"chatstress/internal/model"
 	"chatstress/internal/oracle"
+	"chatstress/internal/querygen"
 	"chatstress/internal/redisx"
 )
 
@@ -95,7 +95,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/control", s.handleControl)
 	mux.HandleFunc("/api/recent-queries", s.handleRecentQueries)
-	mux.HandleFunc("/api/fuzz", s.handleFuzz)
+	mux.HandleFunc("/api/randomize", s.handleRandomize)
 	mux.HandleFunc("/api/gen-queries", s.handleGenQueries)
 	mux.HandleFunc("/api/run-queries", s.handleRunQueries)
 	sub, err := fs.Sub(staticFS, "static")
@@ -390,14 +390,17 @@ type controlResp struct {
 	Concurrency int           `json:"concurrency"`
 	MaxWorkers  int           `json:"max_workers"`
 	PageDepth   int           `json:"page_depth"`
+	Paused      bool          `json:"paused"`
+	PoolSize    int           `json:"pool_size"`
 	Profiles    []profileView `json:"profiles"`
 }
 
 type controlReq struct {
-	Rate        *int `json:"rate"`
-	TimeoutMs   *int `json:"timeout_ms"`
-	Limit       *int `json:"limit"`
-	Concurrency *int `json:"concurrency"`
+	Rate        *int  `json:"rate"`
+	TimeoutMs   *int  `json:"timeout_ms"`
+	Limit       *int  `json:"limit"`
+	Concurrency *int  `json:"concurrency"`
+	Paused      *bool `json:"paused"`
 	Profiles    []struct {
 		Name   string `json:"name"`
 		Weight int    `json:"weight"`
@@ -423,12 +426,19 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 		if req.Concurrency != nil {
 			s.ctrl.SetConcurrency(*req.Concurrency)
 		}
+		if req.Paused != nil {
+			s.ctrl.SetPaused(*req.Paused)
+		}
 		if len(req.Profiles) > 0 {
 			ps := make([]config.QueryProfile, 0, len(req.Profiles))
 			for _, p := range req.Profiles {
 				ps = append(ps, config.QueryProfile{Name: p.Name, Weight: p.Weight})
 			}
 			s.ctrl.SetProfiles(ps)
+		}
+		// The pool bakes in the mix + limit, so regenerate it when either changes.
+		if len(req.Profiles) > 0 || req.Limit != nil {
+			s.regenPool()
 		}
 	}
 	// GET or after POST: return current state.
@@ -455,7 +465,8 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, controlResp{
 		Rate: s.ctrl.QueryRate(), TimeoutMs: s.ctrl.TimeoutMs(), Limit: s.ctrl.Limit(),
 		Concurrency: s.ctrl.Concurrency(), MaxWorkers: s.ctrl.MaxWorkers(),
-		PageDepth: s.cfg.Query.PageDepth, Profiles: out,
+		PageDepth: s.cfg.Query.PageDepth, Paused: s.ctrl.Paused(), PoolSize: s.ctrl.PoolSize(),
+		Profiles: out,
 	})
 }
 
@@ -465,50 +476,23 @@ func (s *Server) handleRecentQueries(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.met.RecentQueries())
 }
 
-// --- /api/fuzz (fire a burst of fully-randomized disk-legal queries) ---
+// regenPool rebuilds the shared query pool the background workers run, from the
+// current mix + limit. Called on demand (Randomize) and when the mix/limit change.
+func (s *Server) regenPool() {
+	s.qmu.Lock()
+	defer s.qmu.Unlock()
+	d := querygen.Deps{
+		Pick: s.pick, Gen: s.gen, Tiers: s.tiers,
+		PageDepth: s.cfg.Query.PageDepth, Limit: s.ctrl.Limit(), Live: s.orc.LiveSample,
+	}
+	s.ctrl.SetPool(querygen.Pool(s.rnd, s.cfg.Query.PoolSize, s.ctrl.Profiles(), d))
+}
 
-func (s *Server) handleFuzz(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Count int `json:"count"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	if req.Count <= 0 {
-		req.Count = 12
-	}
-	if req.Count > 100 {
-		req.Count = 100
-	}
-	to := s.ctrl.TimeoutMs()
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	defer cancel()
+// --- /api/randomize (regenerate the query pool the background threads run) ---
 
-	out := make([]runResult, 0, req.Count)
-	for i := 0; i < req.Count; i++ {
-		s.qmu.Lock()
-		sample, ok := s.orc.LiveSample()
-		q := fuzz.Build(s.rnd, s.pick, s.gen, fuzz.Params{Tiers: s.tiers, PageDepth: s.cfg.Query.PageDepth}, sample, ok)
-		s.qmu.Unlock()
-		full := make([]any, 0, len(q.Args)+4)
-		full = append(full, q.Cmd, s.cfg.Index)
-		full = append(full, q.Args...)
-		if to > 0 {
-			full = append(full, "TIMEOUT", to)
-		}
-		start := time.Now()
-		total, _, err := s.cli.RawCount(ctx, full...)
-		ms := float64(time.Since(start).Microseconds()) / 1000.0
-		res := runResult{Query: q.Display, Ms: ms}
-		errStr := ""
-		if err != nil {
-			errStr = err.Error()
-			res.Error = errStr
-		} else {
-			res.Total = total
-		}
-		out = append(out, res)
-		s.met.PushQuery(metrics.QSample{TSec: s.met.Elapsed().Seconds(), Profile: "fuzz", Query: q.Display, Ms: ms, Total: total, Err: errStr})
-	}
-	writeJSON(w, out)
+func (s *Server) handleRandomize(w http.ResponseWriter, r *http.Request) {
+	s.regenPool()
+	writeJSON(w, map[string]any{"pool_size": s.ctrl.PoolSize()})
 }
 
 // --- /api/gen-queries (build N editable FT.SEARCH query bodies) ---

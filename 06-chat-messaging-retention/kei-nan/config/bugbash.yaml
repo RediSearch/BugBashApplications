@@ -34,6 +34,7 @@ query:
     - { name: plan_analytics,  weight: 10 }  # wide GROUPBY over ~1M channels — stresses max-aggregate-groups
     - { name: deep_pagination, weight: 10 }
     - { name: text_prefix,     weight: 5 }
+    - { name: fuzz,            weight: 15 }  # broad fuzz across the supported query surface
 
 edit:    { rate: 500 }
 delete:  { rate: 500 }

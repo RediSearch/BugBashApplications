@@ -11,17 +11,31 @@ import (
 	"chatstress/internal/config"
 )
 
+// QueryItem is one concrete, ready-to-run query in the shared pool that the
+// background query workers execute. Args are the arguments AFTER the index name.
+type QueryItem struct {
+	Profile   string
+	Cmd       string // "FT.SEARCH" or "FT.AGGREGATE"
+	Args      []any
+	Display   string
+	NoContent bool // FT.SEARCH NOCONTENT => reply keys are checkable
+}
+
 // Control is the shared, live-updatable query configuration.
 type Control struct {
 	queryRate   atomic.Int64 // queries/sec target (0 = unlimited)
 	timeoutMs   atomic.Int64 // per-query TIMEOUT ms (0 = server default)
 	limit       atomic.Int64 // FT.SEARCH LIMIT count
 	concurrency atomic.Int64 // number of query worker threads/connections
+	paused      atomic.Bool  // when true, all workers idle
 	maxWorkers  int          // hard cap on concurrency (immutable; sizes the conn pool)
 
 	mu          sync.RWMutex
 	profiles    []config.QueryProfile
 	totalWeight int
+
+	poolMu sync.RWMutex
+	pool   []QueryItem // the concrete queries the workers currently run
 }
 
 // New initializes control from the config.
@@ -50,6 +64,38 @@ func (c *Control) SetConcurrency(v int) {
 
 // MaxWorkers is the hard concurrency cap.
 func (c *Control) MaxWorkers() int { return c.maxWorkers }
+
+// Paused / SetPaused — when paused, all workers idle (no ingest/query/mutation).
+func (c *Control) Paused() bool     { return c.paused.Load() }
+func (c *Control) SetPaused(v bool) { c.paused.Store(v) }
+
+// SetPool replaces the query pool the workers run.
+func (c *Control) SetPool(items []QueryItem) {
+	c.poolMu.Lock()
+	c.pool = items
+	c.poolMu.Unlock()
+}
+
+// PoolSize returns the number of queries currently in the pool.
+func (c *Control) PoolSize() int {
+	c.poolMu.RLock()
+	defer c.poolMu.RUnlock()
+	return len(c.pool)
+}
+
+// PickPooled returns a query from the pool chosen by the given random int.
+// ok is false when the pool is empty.
+func (c *Control) PickPooled(rn int) (QueryItem, bool) {
+	c.poolMu.RLock()
+	defer c.poolMu.RUnlock()
+	if len(c.pool) == 0 {
+		return QueryItem{}, false
+	}
+	if rn < 0 {
+		rn = -rn
+	}
+	return c.pool[rn%len(c.pool)], true
+}
 
 // QueryRate / SetQueryRate — target queries per second (0 = unlimited).
 func (c *Control) QueryRate() int { return int(c.queryRate.Load()) }

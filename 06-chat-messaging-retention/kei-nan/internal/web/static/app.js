@@ -207,6 +207,14 @@ function mixRow(p) {
     <input type="number" class="mx-wt" min="1" value="${wt}" ${on ? "" : "disabled"} />
   </div>`;
 }
+let paused = false;
+function applyPausedUI() {
+  const btn = document.getElementById("c-pause");
+  btn.textContent = paused ? "▶ Resume" : "⏸ Pause";
+  btn.classList.toggle("primary", paused);
+  const b = document.getElementById("badge-paused");
+  b.style.display = paused ? "" : "none";
+}
 async function loadControl() {
   try {
     const c = await getJSON("/api/control");
@@ -215,6 +223,7 @@ async function loadControl() {
     document.getElementById("c-rate").value = c.rate;
     document.getElementById("c-timeout").value = c.timeout_ms;
     document.getElementById("c-limit").value = c.limit;
+    paused = c.paused; applyPausedUI();
     document.getElementById("mix").innerHTML = c.profiles.map(mixRow).join("");
     document.querySelectorAll("#mix .mx-on").forEach((cb) => cb.addEventListener("change", () => {
       const row = cb.closest(".mixrow"); const wt = row.querySelector(".mx-wt");
@@ -249,12 +258,16 @@ async function applyControl() {
   };
   try { await postJSON("/api/control", body); loadControl(); } catch (e) {}
 }
-async function fuzzNow() {
-  const btn = document.getElementById("c-fuzz");
-  btn.disabled = true; const prev = btn.textContent; btn.textContent = "🎲 firing…";
-  try { await postJSON("/api/fuzz", { count: 15 }); await refreshFeed(); }
+async function randomizeNow() {
+  const btn = document.getElementById("c-randomize");
+  btn.disabled = true; const prev = btn.textContent; btn.textContent = "🎲 re-rolling…";
+  try { await postJSON("/api/randomize", {}); await refreshFeed(); }
   catch (e) {}
   finally { btn.disabled = false; btn.textContent = prev; }
+}
+async function pauseToggle() {
+  paused = !paused; applyPausedUI();
+  try { await postJSON("/api/control", { paused }); } catch (e) {}
 }
 
 // ---------- conversations + inline inspect search ----------
@@ -349,7 +362,8 @@ async function tickStats() { try { renderStats(await getJSON("/api/stats")); } c
 
 loadConfig(); loadControl(); tickStats(); refreshChannels(); refreshMessages(); refreshFeed();
 document.getElementById("c-apply").addEventListener("click", applyControl);
-document.getElementById("c-fuzz").addEventListener("click", fuzzNow);
+document.getElementById("c-randomize").addEventListener("click", randomizeNow);
+document.getElementById("c-pause").addEventListener("click", pauseToggle);
 document.getElementById("s-run").addEventListener("click", refreshMessages);
 document.getElementById("s-clear").addEventListener("click", () => { document.getElementById("s-text").value = ""; refreshMessages(); });
 document.getElementById("s-text").addEventListener("keydown", (e) => { if (e.key === "Enter") refreshMessages(); });
