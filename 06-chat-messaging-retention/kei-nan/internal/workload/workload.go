@@ -7,6 +7,7 @@ package workload
 import (
 	"context"
 	"math/rand"
+	"strconv"
 	"sync"
 	"time"
 
@@ -211,10 +212,23 @@ func (r *Runner) queryer(ctx context.Context, id int) {
 		n := r.ctrl.Limit()
 		to := r.ctrl.TimeoutMs()
 		start := time.Now()
-		err := r.runProfile(ctx, prof, rnd, pick, gen, n, to)
-		r.met.RecordQuery(prof, time.Since(start), slowMs)
+		qstr, total, err := r.runProfile(ctx, prof, rnd, pick, gen, n, to)
+		lat := time.Since(start)
+		r.met.RecordQuery(prof, lat, slowMs)
 		if err != nil && ctx.Err() == nil {
 			r.met.C.QueryErrors.Add(1)
+		}
+		// Sample ~1/8 of executed queries into the live "recent queries" feed so
+		// the UI shows the actual (randomized) commands being sent.
+		if qstr != "" && iter%8 == 0 && ctx.Err() == nil {
+			errStr := ""
+			if err != nil {
+				errStr = err.Error()
+			}
+			r.met.PushQuery(metrics.QSample{
+				TSec: r.met.Elapsed().Seconds(), Profile: prof, Query: qstr,
+				Ms: float64(lat.Microseconds()) / 1000.0, Total: total, Err: errStr,
+			})
 		}
 
 		// Every few queries, probe a comfortably-expired doc: it must be absent.
@@ -259,10 +273,13 @@ func (r *Runner) paceQuery(ctx context.Context) {
 	}
 }
 
-// runProfile executes one query of the given profile. Profiles that return
-// document keys feed the no-stale-hits oracle; aggregate profiles are executed
-// for their latency/timeout/OOM behavior. Each targets a disk pattern/weak-point.
-func (r *Runner) runProfile(ctx context.Context, prof string, rnd *rand.Rand, pick *model.Picker, gen *gendata.Generator, n, to int) error {
+// runProfile builds and executes ONE randomized query of the given profile and
+// returns a human-readable form of it, the match/row count, and any error. The
+// query STRUCTURE is randomized (scope fields, term operators, GROUPBY fields and
+// reducers, sort direction, offsets) so the load is a varied stream rather than a
+// handful of fixed templates. Profiles that return document keys feed the
+// no-stale-hits oracle; aggregate profiles are run for their latency/OOM behavior.
+func (r *Runner) runProfile(ctx context.Context, prof string, rnd *rand.Rand, pick *model.Picker, gen *gendata.Generator, n, to int) (string, int64, error) {
 	checkKeys := func(keys []string, t0 int64) {
 		for _, k := range keys {
 			r.orc.Check(k, t0)
@@ -270,15 +287,16 @@ func (r *Runner) runProfile(ctx context.Context, prof string, rnd *rand.Rand, pi
 	}
 
 	switch prof {
-	case "channel_search": // scoped text in a channel; recall-checked
+	case "channel_search": // scoped text in a channel; recall-checked (kept exact)
 		s, ok := r.orc.LiveSample()
 		if !ok {
-			return nil
+			return "", 0, nil
 		}
+		q := "@" + model.FieldChannel + ":{" + s.Channel + "} " + s.Token
 		t0 := time.Now().UnixMilli()
-		_, keys, err := r.cli.Search(ctx, "@"+model.FieldChannel+":{"+s.Channel+"} "+s.Token, n, to)
+		total, keys, err := r.cli.Search(ctx, q, n, to)
 		if err != nil {
-			return err
+			return "FT.SEARCH " + q, 0, err
 		}
 		found := false
 		for _, k := range keys {
@@ -288,84 +306,101 @@ func (r *Runner) runProfile(ctx context.Context, prof string, rnd *rand.Rand, pi
 			r.orc.Check(k, t0)
 		}
 		r.orc.RecordRecall(found)
-		return nil
+		return "FT.SEARCH " + q, total, nil
 
-	case "thread_search": // high-cardinality thread posting list
-		tid, _ := pick.Tenant()
-		cid, _ := pick.ChannelID(tid)
-		thread := pick.Thread(cid)
+	case "thread_search": // randomized scope field + term operator
+		field, val := r.randScope(rnd, pick)
+		q := "@" + field + ":{" + val + "} " + r.randTerm(rnd, gen)
 		t0 := time.Now().UnixMilli()
-		_, keys, err := r.cli.Search(ctx, "@"+model.FieldThread+":{"+thread+"} "+gen.Word(), n, to)
-		if err != nil {
-			return err
+		total, keys, err := r.cli.Search(ctx, q, n, to)
+		if err == nil {
+			checkKeys(keys, t0)
 		}
-		checkKeys(keys, t0)
-		return nil
+		return "FT.SEARCH " + q, total, err
 
-	case "tag_filter": // retention-tier / tenant TAG filter + term
+	case "tag_filter": // TAG filter (single value or OR of two) + optional negation
 		var scope string
-		if rnd.Intn(2) == 0 {
+		if rnd.Intn(2) == 0 && len(r.cfg.Tiers) >= 2 {
+			scope = "@" + model.FieldPlan + ":{" + r.pickTier(rnd).Name + "|" + r.pickTier(rnd).Name + "}"
+		} else if rnd.Intn(2) == 0 {
 			scope = "@" + model.FieldPlan + ":{" + r.pickTier(rnd).Name + "}"
 		} else {
 			_, tenant := pick.Tenant()
 			scope = "@" + model.FieldTenant + ":{" + tenant + "}"
 		}
-		t0 := time.Now().UnixMilli()
-		_, keys, err := r.cli.Search(ctx, scope+" "+gen.Word(), n, to)
-		if err != nil {
-			return err
+		term := r.randTerm(rnd, gen)
+		if rnd.Intn(3) == 0 {
+			term += " -" + gen.Word() // negation
 		}
-		checkKeys(keys, t0)
-		return nil
+		q := scope + " " + term
+		t0 := time.Now().UnixMilli()
+		total, keys, err := r.cli.Search(ctx, q, n, to)
+		if err == nil {
+			checkKeys(keys, t0)
+		}
+		return "FT.SEARCH " + q, total, err
 
 	case "recent_timeline": // FT.AGGREGATE: LOAD unindexed @ts + APPLY to_number + SORTBY
 		ch := r.channelFor(pick)
-		_, err := r.cli.Aggregate(ctx, to, "@"+model.FieldChannel+":{"+ch+"}",
-			"LOAD", 2, "@"+model.FieldTs, "@"+model.FieldUser,
-			"APPLY", "to_number(@"+model.FieldTs+")", "AS", "ts_num",
-			"SORTBY", 2, "@ts_num", "DESC",
-			"LIMIT", 0, n)
-		return err
+		dir := "DESC"
+		if rnd.Intn(2) == 0 {
+			dir = "ASC"
+		}
+		filter := "@" + model.FieldChannel + ":{" + ch + "}"
+		// FILTER exists(@ts) BEFORE the APPLY: a doc that expired but hasn't been
+		// reclaimed can be returned by the match yet have no hash fields to LOAD,
+		// so to_number(@ts) would throw once SORTBY forces every row to evaluate.
+		args := []any{filter,
+			"LOAD", 2, "@" + model.FieldTs, "@" + model.FieldUser,
+			"FILTER", "exists(@" + model.FieldTs + ")",
+			"APPLY", "to_number(@" + model.FieldTs + ")", "AS", "ts_num",
+			"SORTBY", 2, "@ts_num", dir,
+			"LIMIT", 0, n}
+		rows, err := r.cli.Aggregate(ctx, to, args...)
+		disp := "FT.AGGREGATE '" + filter + "' LOAD @ts @user_id FILTER exists(@ts) APPLY to_number(@ts) SORTBY @ts_num " + dir
+		return disp, int64(rows), err
 
-	case "plan_analytics": // wide GROUPBY on a high-cardinality TAG (OOM weak-point)
-		_, err := r.cli.Aggregate(ctx, to, "*",
-			"GROUPBY", 1, "@"+model.FieldChannel,
-			"REDUCE", "COUNT", 0, "AS", "n",
-			"SORTBY", 2, "@n", "DESC",
-			"LIMIT", 0, 10)
-		return err
+	case "plan_analytics": // GROUPBY a random field + random reducer (wide-groupby weak-point)
+		gfield := r.randGroupField(rnd)
+		redArgs, redDisp := r.randReducer(rnd)
+		args := []any{"*", "GROUPBY", 1, "@" + gfield}
+		args = append(args, redArgs...)
+		args = append(args, "SORTBY", 2, "@n", "DESC", "LIMIT", 0, 20)
+		rows, err := r.cli.Aggregate(ctx, to, args...)
+		disp := "FT.AGGREGATE '*' GROUPBY @" + gfield + " REDUCE " + redDisp + " SORTBY @n DESC"
+		return disp, int64(rows), err
 
 	case "deep_pagination": // large LIMIT offset (large-offset / OOM weak-point)
 		s, ok := r.orc.LiveSample()
 		if !ok {
-			return nil
+			return "", 0, nil
 		}
 		offset := 0
 		if r.cfg.Query.PageDepth > 0 {
 			offset = rnd.Intn(r.cfg.Query.PageDepth)
 		}
+		q := "@" + model.FieldChannel + ":{" + s.Channel + "} " + s.Token
 		t0 := time.Now().UnixMilli()
-		_, keys, err := r.cli.SearchLimit(ctx, "@"+model.FieldChannel+":{"+s.Channel+"} "+s.Token, offset, n, to)
-		if err != nil {
-			return err
+		total, keys, err := r.cli.SearchLimit(ctx, q, offset, n, to)
+		if err == nil {
+			checkKeys(keys, t0)
 		}
-		checkKeys(keys, t0)
-		return nil
+		return "FT.SEARCH " + q + " LIMIT " + strconv.Itoa(offset) + " " + strconv.Itoa(n), total, err
 
-	case "text_prefix": // TEXT prefix expansion (foo*)
+	case "text_prefix": // randomized TEXT wildcard/prefix/fuzzy expansion
 		s, ok := r.orc.LiveSample()
 		if !ok {
-			return nil
+			return "", 0, nil
 		}
+		q := "@" + model.FieldChannel + ":{" + s.Channel + "} " + r.fuzzyOf(rnd, s.Token)
 		t0 := time.Now().UnixMilli()
-		_, keys, err := r.cli.Search(ctx, "@"+model.FieldChannel+":{"+s.Channel+"} "+prefixOf(s.Token), n, to)
-		if err != nil {
-			return err
+		total, keys, err := r.cli.Search(ctx, q, n, to)
+		if err == nil {
+			checkKeys(keys, t0)
 		}
-		checkKeys(keys, t0)
-		return nil
+		return "FT.SEARCH " + q, total, err
 	}
-	return nil
+	return "", 0, nil
 }
 
 // channelFor returns a channel that likely has live data (from the oracle),
@@ -377,6 +412,62 @@ func (r *Runner) channelFor(pick *model.Picker) string {
 	tid, _ := pick.Tenant()
 	_, ch := pick.ChannelID(tid)
 	return ch
+}
+
+// randScope returns a random TAG scope (field, value) among channel/user/thread.
+func (r *Runner) randScope(rnd *rand.Rand, pick *model.Picker) (string, string) {
+	tid, _ := pick.Tenant()
+	cid, channel := pick.ChannelID(tid)
+	switch rnd.Intn(3) {
+	case 0:
+		return model.FieldThread, pick.Thread(cid)
+	case 1:
+		return model.FieldUser, pick.User(tid)
+	default:
+		return model.FieldChannel, channel
+	}
+}
+
+// randTerm returns a single word or an OR of two words as a TEXT term.
+func (r *Runner) randTerm(rnd *rand.Rand, gen *gendata.Generator) string {
+	if rnd.Intn(3) == 0 {
+		return "(" + gen.Word() + "|" + gen.Word() + ")"
+	}
+	return gen.Word()
+}
+
+// randGroupField picks a TAG field to GROUP BY (varying cardinality).
+func (r *Runner) randGroupField(rnd *rand.Rand) string {
+	fields := []string{model.FieldPlan, model.FieldTenant, model.FieldChannel, model.FieldUser, model.FieldThread}
+	return fields[rnd.Intn(len(fields))]
+}
+
+// randReducer returns FT.AGGREGATE REDUCE args and a display string.
+func (r *Runner) randReducer(rnd *rand.Rand) ([]any, string) {
+	switch rnd.Intn(3) {
+	case 0:
+		return []any{"REDUCE", "COUNT_DISTINCT", 1, "@" + model.FieldUser, "AS", "n"}, "COUNT_DISTINCT @user_id AS n"
+	case 1:
+		return []any{"REDUCE", "COUNT_DISTINCT", 1, "@" + model.FieldThread, "AS", "n"}, "COUNT_DISTINCT @thread_id AS n"
+	default:
+		return []any{"REDUCE", "COUNT", 0, "AS", "n"}, "COUNT AS n"
+	}
+}
+
+// fuzzyOf randomly turns a term into a prefix, fuzzy or wildcard TEXT query.
+func (r *Runner) fuzzyOf(rnd *rand.Rand, w string) string {
+	switch rnd.Intn(3) {
+	case 0:
+		return "%" + w + "%" // fuzzy (Levenshtein 1)
+	case 1:
+		rs := []rune(w)
+		if len(rs) > 2 {
+			return "w'" + string(rs[0]) + "?" + string(rs[2:]) + "'" // wildcard
+		}
+		return prefixOf(w)
+	default:
+		return prefixOf(w) // prefix foo*
+	}
 }
 
 // prefixOf turns a term into a prefix query (e.g. "deploy" -> "deplo*"). It is

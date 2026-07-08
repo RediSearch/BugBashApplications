@@ -103,8 +103,15 @@ from the dashboard**). Each targets a disk pattern / weak-point:
 | `channel_search` | `FT.SEARCH @channel_id:{c} term` | the common case; recall-checked |
 | `thread_search` | `FT.SEARCH @thread_id:{th} term` | high-cardinality TAG posting lists |
 | `tag_filter` | `FT.SEARCH @plan:{tier}\|@tenant_id:{t} term` | retention-tier / tenant filtering |
-| `recent_timeline` | `FT.AGGREGATE … LOAD @ts APPLY to_number SORTBY DESC` | LOAD of unindexed field + numeric sort |
-| `plan_analytics` | `FT.AGGREGATE * GROUPBY @channel_id REDUCE COUNT` | wide GROUPBY (OOM / max-aggregate-groups) |
+| `recent_timeline` | `FT.AGGREGATE … LOAD @ts FILTER exists(@ts) APPLY to_number SORTBY` | LOAD of unindexed field + numeric sort |
+| `plan_analytics` | `FT.AGGREGATE * GROUPBY @<tag> REDUCE COUNT[_DISTINCT]` | wide GROUPBY (OOM / max-aggregate-groups) |
+
+Within each profile the concrete query is **randomized** — scope field, term
+operators (OR / negation / prefix `foo*` / fuzzy `%foo%` / wildcard `w'f?o'`),
+GROUPBY field and reducer, sort direction, and page offset — so the load is a
+varied stream, visible in the dashboard's live query feed. (`recent_timeline`
+guards the numeric sort with `FILTER exists(@ts)` so an expired-but-unreclaimed
+doc returned by the match doesn't make `to_number(@ts)` throw during `SORTBY`.)
 | `deep_pagination` | `FT.SEARCH … LIMIT <big offset> n` | large-offset / OOM-during-execution |
 | `text_prefix` | `FT.SEARCH @channel_id:{c} pre*` | TEXT prefix expansion |
 
@@ -145,6 +152,10 @@ with the timestamp and each series' value.
     connections = more load, up to `max_workers`) and **rate q/s** (0 = max). Also
     per-query **timeout** and result **limit**. **Apply** pushes changes to the
     running workload instantly — no restart.
+- **Live query feed:** a rolling sample of the **actual randomized queries** being
+  sent (profile · command · matches · latency) — so you can see the varied
+  structure (TAG OR/negation, prefix/fuzzy/wildcard, `GROUPBY` on different fields
+  with different reducers, timeline aggregates).
 - **Live conversations:** browse channels; messages fetched live via `FT.SEARCH`
   + `HGETALL` with TTL countdowns, plus an inline text filter (scoped search).
 - **Index status (FT.INFO):** `num_docs`, `num_records`, `inverted_sz_mb`,

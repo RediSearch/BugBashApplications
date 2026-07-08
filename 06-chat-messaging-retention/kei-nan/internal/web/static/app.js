@@ -163,7 +163,9 @@ function hoverChart(cv, e) {
   const rp = nearest(ref.pts, dx); if (!rp) return;
   const tx = rp[0];
   renderChart(cv, c);
-  const { ctx } = prepCanvas(cv); const { X, Y } = XY(c);
+  // reuse the context WITHOUT prepCanvas() — setting canvas.width clears it,
+  // which would wipe the chart we just drew (that was the disappearing bug).
+  const ctx = cv.getContext("2d"); const { X, Y } = XY(c);
   const px = X(tx);
   ctx.strokeStyle = C.muted; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(px, c.padT - 4); ctx.lineTo(px, c.h - c.padB); ctx.stroke(); ctx.setLineDash([]);
   let rows = "";
@@ -312,9 +314,25 @@ async function loadConfig() {
     document.getElementById("tiers").textContent = "retention tiers: " + c.tiers.map((t) => `${t.name} (${t.ttl}, w${t.weight})`).join("  ·  ");
   } catch (e) {}
 }
+async function refreshFeed() {
+  try {
+    const qs = await getJSON("/api/recent-queries");
+    const el = document.getElementById("feed");
+    if (!qs.length) { el.innerHTML = '<div class="muted">waiting for queries…</div>'; return; }
+    el.innerHTML = qs.map((q) => {
+      const cls = "fq" + (q.err ? " err" : "") + (q.ms >= 500 ? " slow" : "");
+      const t = q.err ? "ERR" : fmtNum(q.total);
+      return `<div class="${cls}"><span class="fp ${q.profile}">${q.profile}</span>` +
+        `<span class="fcmd">${escapeHtml(q.query)}</span>` +
+        `<span class="ft" title="${q.err ? escapeHtml(q.err) : "matches/rows"}">${t}</span>` +
+        `<span class="fm">${q.ms.toFixed(1)}ms</span></div>`;
+    }).join("");
+  } catch (e) {}
+}
+
 async function tickStats() { try { renderStats(await getJSON("/api/stats")); } catch (e) {} }
 
-loadConfig(); loadControl(); tickStats(); refreshChannels(); refreshMessages();
+loadConfig(); loadControl(); tickStats(); refreshChannels(); refreshMessages(); refreshFeed();
 document.getElementById("c-apply").addEventListener("click", applyControl);
 document.getElementById("c-randomize").addEventListener("click", randomizeTypes);
 document.getElementById("s-run").addEventListener("click", refreshMessages);
@@ -326,3 +344,4 @@ setInterval(refreshChannels, 6000);
 setInterval(refreshMessages, 3000);
 setInterval(tickTTLs, 1000);
 setInterval(refreshCounts, 3000);
+setInterval(refreshFeed, 1500);

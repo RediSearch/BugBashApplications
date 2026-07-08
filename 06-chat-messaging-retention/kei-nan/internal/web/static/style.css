@@ -118,6 +118,23 @@ figure { margin: 0; }
 figcaption { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
 canvas { width: 100%; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; cursor: crosshair; }
 
+/* live query feed */
+.feed { display: flex; flex-direction: column; gap: 4px; max-height: 300px; overflow: auto; }
+.feed .fq { display: grid; grid-template-columns: 130px 1fr 90px 70px; gap: 10px; align-items: center; font-size: 12px; padding: 5px 8px; background: var(--panel2); border: 1px solid var(--line); border-radius: 7px; }
+.feed .fp { font-weight: 700; font-size: 11px; }
+.feed .fcmd { font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--text); word-break: break-all; }
+.feed .ft { color: var(--green); text-align: right; font-variant-numeric: tabular-nums; }
+.feed .fm { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.feed .fq.err .ft { color: var(--red); }
+.feed .fq.slow .fm { color: var(--amber); }
+.fp.channel_search { color: var(--green); }
+.fp.thread_search { color: var(--blue); }
+.fp.tag_filter { color: var(--amber); }
+.fp.recent_timeline { color: var(--purple); }
+.fp.plan_analytics { color: var(--red); }
+.fp.deep_pagination { color: #e07b53; }
+.fp.text_prefix { color: #6fd3e0; }
+
 .tooltip {
   position: fixed; pointer-events: none; z-index: 50; display: none;
   background: #0b0d12; border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px;

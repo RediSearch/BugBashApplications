@@ -30,7 +30,7 @@
     <section class="panel span2" id="p-load">
       <div class="panel-head" data-collapse>
         <h2>Query load</h2>
-        <span class="hint">choose the query types &amp; how hard to drive them — sent automatically by N threads</span>
+        <span class="hint">enabled types drive an automatic, randomized query stream across N threads — see the live feed below</span>
         <span class="chevron">▾</span>
       </div>
       <div class="panel-body">
@@ -40,11 +40,11 @@
           <label>timeout ms<input id="c-timeout" type="number" min="0" step="50" /><small>0 = default</small></label>
           <label>limit<input id="c-limit" type="number" min="1" step="10" /><small>rows/query</small></label>
           <div class="load-btns">
-            <button id="c-randomize">🎲 Randomize types</button>
+            <button id="c-randomize" title="randomize which types are enabled and their weights">🎲 Shuffle mix</button>
             <button id="c-apply" class="primary">Apply</button>
           </div>
         </div>
-        <div class="mix-head">Query types <span class="hint">toggle on/off · set relative weight · counts update live</span></div>
+        <div class="mix-head">Query types <span class="hint">toggle on/off · weight = probability · each type emits randomized queries · counts update live</span></div>
         <div class="mix" id="mix"></div>
       </div>
     </section>
@@ -87,6 +87,15 @@
           <figure><figcaption>query latency p50 / p99 (ms)</figcaption><canvas id="c-lat" height="170"></canvas></figure>
         </div>
       </div>
+    </section>
+    <!-- Live query feed (the actual randomized queries being sent) -->
+    <section class="panel span3" id="p-feed">
+      <div class="panel-head" data-collapse>
+        <h2>Live query feed</h2>
+        <span class="hint">a live sample of the actual randomized queries hitting the cluster (profile · command · matches · latency)</span>
+        <span class="chevron">▾</span>
+      </div>
+      <div class="panel-body"><div class="feed" id="feed"><div class="muted">waiting for queries…</div></div></div>
     </section>
   </main>
 

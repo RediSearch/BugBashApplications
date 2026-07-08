@@ -87,6 +87,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/search", s.handleSearch)
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/control", s.handleControl)
+	mux.HandleFunc("/api/recent-queries", s.handleRecentQueries)
 	mux.HandleFunc("/api/gen-queries", s.handleGenQueries)
 	mux.HandleFunc("/api/run-queries", s.handleRunQueries)
 	sub, err := fs.Sub(staticFS, "static")
@@ -448,6 +449,12 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 		Concurrency: s.ctrl.Concurrency(), MaxWorkers: s.ctrl.MaxWorkers(),
 		PageDepth: s.cfg.Query.PageDepth, Profiles: out,
 	})
+}
+
+// --- /api/recent-queries (live feed of the actual randomized queries sent) ---
+
+func (s *Server) handleRecentQueries(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.met.RecentQueries())
 }
 
 // --- /api/gen-queries (build N editable FT.SEARCH query bodies) ---

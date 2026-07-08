@@ -99,6 +99,43 @@ type Metrics struct {
 
 	statusMu sync.RWMutex
 	status   Status
+
+	rqMu   sync.Mutex
+	recent []QSample // ring buffer of recently-executed queries (sampled)
+	rqCap  int
+}
+
+// QSample is one recorded (sampled) executed query, for the live query feed.
+type QSample struct {
+	TSec    float64 `json:"t"`
+	Profile string  `json:"profile"`
+	Query   string  `json:"query"`
+	Ms      float64 `json:"ms"`
+	Total   int64   `json:"total"`
+	Err     string  `json:"err,omitempty"`
+}
+
+// PushQuery records an executed query into the recent-queries ring.
+func (m *Metrics) PushQuery(q QSample) {
+	m.rqMu.Lock()
+	if len(m.recent) < m.rqCap {
+		m.recent = append(m.recent, q)
+	} else {
+		copy(m.recent, m.recent[1:])
+		m.recent[len(m.recent)-1] = q
+	}
+	m.rqMu.Unlock()
+}
+
+// RecentQueries returns the recorded queries, newest first.
+func (m *Metrics) RecentQueries() []QSample {
+	m.rqMu.Lock()
+	defer m.rqMu.Unlock()
+	out := make([]QSample, len(m.recent))
+	for i, q := range m.recent {
+		out[len(m.recent)-1-i] = q
+	}
+	return out
 }
 
 // Status is the latest overall index status (FT.INFO + INFO), refreshed by the
@@ -140,7 +177,7 @@ func (m *Metrics) Status() Status {
 
 // New returns an initialized Metrics.
 func New() *Metrics {
-	return &Metrics{Lat: newHist(), start: time.Now(), profCounts: map[string]int64{}}
+	return &Metrics{Lat: newHist(), start: time.Now(), profCounts: map[string]int64{}, rqCap: 60}
 }
 
 // Elapsed since start.
