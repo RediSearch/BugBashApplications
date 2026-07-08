@@ -5,7 +5,7 @@ go 1.23
 // Dependencies are resolved by `go mod tidy` during the containerized build
 // (see build.sh / Makefile). Both are pure-Go so the binary builds static.
 require (
-	github.com/redis/go-redis/v9 v9.7.0
+	github.com/redis/go-redis/v9 v9.7.3
 	gopkg.in/yaml.v3 v3.0.1
 )
 
