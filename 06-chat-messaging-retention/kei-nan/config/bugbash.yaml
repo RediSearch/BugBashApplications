@@ -1,0 +1,57 @@
+# Large disk run: point -addr at a Flex/BigRedis (disk-index-capable) server
+# configured per deploy/flex-redis.conf. Size the dataset so total bytes exceed
+# the server's RAM budget (bigredis-max-ram) — that's the whole point of on-disk
+# indexes. Tune tenants/rates/TTLs to your box; the defaults below sustain a
+# heavy continuous ingest+expiry churn for an hour.
+addr: 127.0.0.1:6379
+index: chat
+prefix: "msg:"
+duration: 60m
+seed: 42
+
+# Large id space => billions-of-messages shape, high-cardinality TAG posting lists.
+tenants: 5000
+channels_per_tenant: 200
+users_per_tenant: 2000
+threads_per_channel: 50
+
+ingest:
+  workers: 32
+  rate: 0            # 0 = unbounded (push as hard as the client/server allow)
+  pipeline: 500
+
+query:
+  workers: 16
+  rate: 2000
+  limit: 50
+
+edit:    { rate: 500 }
+delete:  { rate: 500 }
+sliding: { rate: 1000 }
+
+body: { min_words: 8, max_words: 60 }
+
+# Coexisting short- and long-lived retention tiers. At steady state the live set
+# ~= ingest_rate * (weighted-avg TTL); expire-rate converges on ingest-rate and
+# on-disk footprint should PLATEAU rather than grow without bound.
+tiers:
+  - { name: disappearing, weight: 25, ttl: 5m }
+  - { name: free,         weight: 45, ttl: 30m }
+  - { name: pro,          weight: 20, ttl: 2h }
+  - { name: enterprise,   weight: 10, ttl: 12h }
+
+sample:
+  interval: 5s
+  gc_interval: 60s
+  force_gc: true
+
+oracle:
+  sample_rate: 0.02   # track 2% of messages for the no-stale-hits check (bounds client RAM)
+  max_tracked: 4000000
+  grace_ms: 3000
+
+web:
+  enabled: true
+  addr: ":8080"
+
+out_dir: ./out

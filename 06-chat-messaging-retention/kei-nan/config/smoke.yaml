@@ -1,0 +1,52 @@
+# Tiny in-RAM smoke config: validates harness logic quickly against a local
+# OSS redis-server + module (NOT the disk path). Short TTLs so expiry churn is
+# visible within a ~90s run.
+addr: 127.0.0.1:6399
+index: chat
+prefix: "msg:"
+duration: 90s
+seed: 1
+
+# Small id space so channels/threads are densely populated and easy to browse.
+tenants: 20
+channels_per_tenant: 10
+users_per_tenant: 50
+threads_per_channel: 8
+
+ingest:
+  workers: 4
+  rate: 2000        # messages/sec (0 = unbounded)
+  pipeline: 200
+
+query:
+  workers: 4
+  rate: 200          # queries/sec
+  limit: 20
+
+edit:   { rate: 50 }   # HSET body edits/sec (re-index)
+delete: { rate: 50 }   # UNLINK deletes/sec (de-index)
+sliding: { rate: 100 } # sliding-TTL refreshes/sec
+
+body: { min_words: 6, max_words: 24 }
+
+# Retention-tier mix (whole-key TTL). Short values so we reach steady state fast.
+tiers:
+  - { name: disappearing, weight: 30, ttl: 15s }
+  - { name: free,         weight: 50, ttl: 45s }
+  - { name: pro,          weight: 20, ttl: 120s }
+
+sample:
+  interval: 2s
+  gc_interval: 10s   # force DISK_FLUSH + GC_FORCEINVOKE this often (disk only; no-op in RAM)
+  force_gc: true
+
+oracle:
+  sample_rate: 1.0   # track every message (small run)
+  max_tracked: 500000
+  grace_ms: 1500     # wait this long past expiry before probing a doc is gone
+
+web:
+  enabled: true
+  addr: ":8080"
+
+out_dir: ./out

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>chatstress — Redis Search on Disk (MS2)</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">▚</span>
+      <div>
+        <h1>chatstress</h1>
+        <div class="sub" id="cfg-sub">use-case 6 · chat / messaging with retention</div>
+      </div>
+    </div>
+    <div class="badges">
+      <span class="badge" id="badge-mode">mode …</span>
+      <span class="badge" id="badge-correct">correctness …</span>
+      <span class="badge" id="badge-plateau">footprint …</span>
+      <span class="badge ghost" id="badge-elapsed">t=0s</span>
+    </div>
+  </header>
+
+  <section class="kpis" id="kpis"></section>
+
+  <main class="grid">
+    <!-- Conversations -->
+    <section class="panel span2">
+      <div class="panel-head">
+        <h2>Live conversations</h2>
+        <span class="hint">messages are fetched live from the disk index (FT.SEARCH + HGETALL); watch TTLs count down and disappear</span>
+      </div>
+      <div class="conv">
+        <div class="channels" id="channels"><div class="muted">loading channels…</div></div>
+        <div class="messages" id="messages"><div class="muted">pick a channel</div></div>
+      </div>
+    </section>
+
+    <!-- Search -->
+    <section class="panel">
+      <div class="panel-head"><h2>Interactive search</h2></div>
+      <div class="search">
+        <div class="fields">
+          <label>channel <input id="s-channel" placeholder="c42" /></label>
+          <label>user <input id="s-user" placeholder="u7" /></label>
+          <label>thread <input id="s-thread" placeholder="th3" /></label>
+          <label class="wide">text <input id="s-text" placeholder="deploy" /></label>
+        </div>
+        <button id="s-run">Search</button>
+        <div class="query" id="s-query"></div>
+        <div class="messages" id="s-results"><div class="muted">run a scoped full-text search</div></div>
+      </div>
+    </section>
+
+    <!-- Stats charts -->
+    <section class="panel span3">
+      <div class="panel-head">
+        <h2>Database stats</h2>
+        <span class="hint" id="verdict-note"></span>
+      </div>
+      <div class="charts">
+        <figure><figcaption id="cap-foot">on-disk footprint</figcaption><canvas id="c-foot" height="180"></canvas></figure>
+        <figure><figcaption>indexed docs vs records</figcaption><canvas id="c-docs" height="180"></canvas></figure>
+        <figure><figcaption>ingest &amp; query throughput</figcaption><canvas id="c-rate" height="180"></canvas></figure>
+        <figure><figcaption>query latency (ms)</figcaption><canvas id="c-lat" height="180"></canvas></figure>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span id="tiers"></span>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
