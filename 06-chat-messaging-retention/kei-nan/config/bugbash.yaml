@@ -22,14 +22,27 @@ ingest:
 
 query:
   workers: 16
-  rate: 2000
+  rate: 2000         # tunable live from the UI
   limit: 50
+  page_depth: 100000 # deep offsets to probe the large-offset / OOM guardrail
+  slow_ms: 500       # matches the default server query timeout
+  profiles:
+    - { name: channel_search,  weight: 35 }
+    - { name: thread_search,   weight: 15 }
+    - { name: tag_filter,      weight: 10 }
+    - { name: recent_timeline, weight: 15 }
+    - { name: plan_analytics,  weight: 10 }  # wide GROUPBY over ~1M channels — stresses max-aggregate-groups
+    - { name: deep_pagination, weight: 10 }
+    - { name: text_prefix,     weight: 5 }
 
 edit:    { rate: 500 }
 delete:  { rate: 500 }
 sliding: { rate: 1000 }
 
-body: { min_words: 8, max_words: 60 }
+# vocab_high sprinkles synthetic unique-ish terms into bodies to grow the on-disk
+# TEXT term dictionary, which is PINNED IN RAM and scales with distinct-term count
+# (~100MB per 1M terms) — a key Flex weak-point. 0 disables it.
+body: { min_words: 8, max_words: 60, vocab_high: 5000000 }
 
 # Coexisting short- and long-lived retention tiers. At steady state the live set
 # ~= ingest_rate * (weighted-avg TTL); expire-rate converges on ingest-rate and

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"chatstress/internal/config"
+	"chatstress/internal/control"
 	"chatstress/internal/gendata"
 	"chatstress/internal/metrics"
 	"chatstress/internal/model"
@@ -24,14 +25,15 @@ type Runner struct {
 	cli   *redisx.Client
 	orc   *oracle.Oracle
 	met   *metrics.Metrics
+	ctrl  *control.Control
 	space model.Space
 	seq   seqCounter
 }
 
-// New builds a Runner over shared metrics/oracle/client.
-func New(cfg *config.Config, cli *redisx.Client, orc *oracle.Oracle, met *metrics.Metrics) *Runner {
+// New builds a Runner over shared metrics/oracle/client/control.
+func New(cfg *config.Config, cli *redisx.Client, orc *oracle.Oracle, met *metrics.Metrics, ctrl *control.Control) *Runner {
 	return &Runner{
-		cfg: cfg, cli: cli, orc: orc, met: met,
+		cfg: cfg, cli: cli, orc: orc, met: met, ctrl: ctrl,
 		space: model.Space{
 			Tenants:           cfg.Tenants,
 			ChannelsPerTenant: cfg.ChannelsPerTenant,
@@ -50,13 +52,11 @@ func (r *Runner) Run(ctx context.Context) {
 		batchRate = ceilDiv(r.cfg.Ingest.Rate, r.cfg.Ingest.Pipeline)
 	}
 	ingestLim := NewLimiter(batchRate)
-	queryLim := NewLimiter(r.cfg.Query.Rate)
 	editLim := NewLimiter(r.cfg.Edit.Rate)
 	delLim := NewLimiter(r.cfg.Delete.Rate)
 	slideLim := NewLimiter(r.cfg.Sliding.Rate)
 	defer func() {
 		ingestLim.Close()
-		queryLim.Close()
 		editLim.Close()
 		delLim.Close()
 		slideLim.Close()
@@ -66,9 +66,10 @@ func (r *Runner) Run(ctx context.Context) {
 		wg.Add(1)
 		go func(id int) { defer wg.Done(); r.ingester(ctx, id, ingestLim) }(i)
 	}
+	// Query workers self-pace from live control (rate is tunable at runtime).
 	for i := 0; i < r.cfg.Query.Workers; i++ {
 		wg.Add(1)
-		go func(id int) { defer wg.Done(); r.queryer(ctx, id, queryLim) }(i)
+		go func(id int) { defer wg.Done(); r.queryer(ctx, id) }(i)
 	}
 	wg.Add(3)
 	go func() { defer wg.Done(); r.editor(ctx, editLim) }()
@@ -89,7 +90,7 @@ func (r *Runner) Run(ctx context.Context) {
 
 func (r *Runner) ingester(ctx context.Context, id int, lim *Limiter) {
 	pick := model.NewPicker(r.space, r.cfg.Seed, int64(id)*101+1)
-	gen := gendata.New(r.cfg.Seed, int64(id)*307+5, r.cfg.Body.MinWords, r.cfg.Body.MaxWords)
+	gen := gendata.New(r.cfg.Seed, int64(id)*307+5, r.cfg.Body.MinWords, r.cfg.Body.MaxWords, r.cfg.Body.VocabHigh)
 	rnd := rand.New(rand.NewSource(r.cfg.Seed*911 + int64(id)))
 	pipeline := r.cfg.Ingest.Pipeline
 
@@ -146,51 +147,31 @@ func (r *Runner) ingester(ctx context.Context, id int, lim *Limiter) {
 	}
 }
 
-func (r *Runner) queryer(ctx context.Context, id int, lim *Limiter) {
+func (r *Runner) queryer(ctx context.Context, id int) {
 	rnd := rand.New(rand.NewSource(r.cfg.Seed*53 + int64(id)*17 + 3))
-	n := r.cfg.Query.Limit
+	pick := model.NewPicker(r.space, r.cfg.Seed, int64(id)*29+7)
+	gen := gendata.New(r.cfg.Seed, int64(id)*71+11, r.cfg.Body.MinWords, r.cfg.Body.MaxWords, 0)
+	slowMs := r.cfg.Query.SlowMs
+	workers := r.cfg.Query.Workers
 	iter := 0
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		lim.Wait(ctx)
+		r.paceQuery(ctx, workers)
 		iter++
 
-		sample, ok := r.orc.LiveSample()
-		if !ok {
+		prof := r.ctrl.PickProfile(rnd.Int())
+		if prof == "" {
 			continue
 		}
-
-		scoped := rnd.Float64() < 0.85
-		var query string
-		if scoped {
-			query = "@" + model.FieldChannel + ":{" + sample.Channel + "} " + sample.Token
-		} else {
-			query = sample.Token // unscoped: stresses high-cardinality posting lists
-		}
-
-		t0 := time.Now().UnixMilli()
+		n := r.ctrl.Limit()
+		to := r.ctrl.TimeoutMs()
 		start := time.Now()
-		_, keys, err := r.cli.Search(ctx, query, n)
-		r.met.Lat.Record(time.Since(start))
-		r.met.C.Queries.Add(1)
-		if err != nil {
-			if ctx.Err() == nil { // don't count queries cancelled at shutdown
-				r.met.C.QueryErrors.Add(1)
-			}
-			continue
-		}
-
-		found := false
-		for _, k := range keys {
-			if k == sample.Key {
-				found = true
-			}
-			r.orc.Check(k, t0) // records any stale-hit violation
-		}
-		if scoped {
-			r.orc.RecordRecall(found)
+		err := r.runProfile(ctx, prof, rnd, pick, gen, n, to)
+		r.met.RecordQuery(prof, time.Since(start), slowMs)
+		if err != nil && ctx.Err() == nil {
+			r.met.C.QueryErrors.Add(1)
 		}
 
 		// Every few queries, probe a comfortably-expired doc: it must be absent.
@@ -198,7 +179,7 @@ func (r *Runner) queryer(ctx context.Context, id int, lim *Limiter) {
 			if es, ok := r.orc.ExpiredSample(); ok {
 				pq := "@" + model.FieldChannel + ":{" + es.Channel + "} " + es.Token
 				pt0 := time.Now().UnixMilli()
-				_, pkeys, perr := r.cli.Search(ctx, pq, n)
+				_, pkeys, perr := r.cli.Search(ctx, pq, n, to)
 				if perr == nil {
 					hit := false
 					for _, k := range pkeys {
@@ -214,8 +195,157 @@ func (r *Runner) queryer(ctx context.Context, id int, lim *Limiter) {
 	}
 }
 
+// paceQuery self-throttles a query worker to (liveRate / workers) qps, reading
+// the live rate each call so the UI can change it at runtime. rate <= 0 = unlimited.
+func (r *Runner) paceQuery(ctx context.Context, workers int) {
+	rate := r.ctrl.QueryRate()
+	if rate <= 0 || workers <= 0 {
+		return
+	}
+	interval := time.Duration(int64(time.Second) * int64(workers) / int64(rate))
+	if interval <= 0 {
+		return
+	}
+	t := time.NewTimer(interval)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+	}
+}
+
+// runProfile executes one query of the given profile. Profiles that return
+// document keys feed the no-stale-hits oracle; aggregate profiles are executed
+// for their latency/timeout/OOM behavior. Each targets a disk pattern/weak-point.
+func (r *Runner) runProfile(ctx context.Context, prof string, rnd *rand.Rand, pick *model.Picker, gen *gendata.Generator, n, to int) error {
+	checkKeys := func(keys []string, t0 int64) {
+		for _, k := range keys {
+			r.orc.Check(k, t0)
+		}
+	}
+
+	switch prof {
+	case "channel_search": // scoped text in a channel; recall-checked
+		s, ok := r.orc.LiveSample()
+		if !ok {
+			return nil
+		}
+		t0 := time.Now().UnixMilli()
+		_, keys, err := r.cli.Search(ctx, "@"+model.FieldChannel+":{"+s.Channel+"} "+s.Token, n, to)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, k := range keys {
+			if k == s.Key {
+				found = true
+			}
+			r.orc.Check(k, t0)
+		}
+		r.orc.RecordRecall(found)
+		return nil
+
+	case "thread_search": // high-cardinality thread posting list
+		tid, _ := pick.Tenant()
+		cid, _ := pick.ChannelID(tid)
+		thread := pick.Thread(cid)
+		t0 := time.Now().UnixMilli()
+		_, keys, err := r.cli.Search(ctx, "@"+model.FieldThread+":{"+thread+"} "+gen.Word(), n, to)
+		if err != nil {
+			return err
+		}
+		checkKeys(keys, t0)
+		return nil
+
+	case "tag_filter": // retention-tier / tenant TAG filter + term
+		var scope string
+		if rnd.Intn(2) == 0 {
+			scope = "@" + model.FieldPlan + ":{" + r.pickTier(rnd).Name + "}"
+		} else {
+			_, tenant := pick.Tenant()
+			scope = "@" + model.FieldTenant + ":{" + tenant + "}"
+		}
+		t0 := time.Now().UnixMilli()
+		_, keys, err := r.cli.Search(ctx, scope+" "+gen.Word(), n, to)
+		if err != nil {
+			return err
+		}
+		checkKeys(keys, t0)
+		return nil
+
+	case "recent_timeline": // FT.AGGREGATE: LOAD unindexed @ts + APPLY to_number + SORTBY
+		ch := r.channelFor(pick)
+		_, err := r.cli.Aggregate(ctx, to, "@"+model.FieldChannel+":{"+ch+"}",
+			"LOAD", 2, "@"+model.FieldTs, "@"+model.FieldUser,
+			"APPLY", "to_number(@"+model.FieldTs+")", "AS", "ts_num",
+			"SORTBY", 2, "@ts_num", "DESC",
+			"LIMIT", 0, n)
+		return err
+
+	case "plan_analytics": // wide GROUPBY on a high-cardinality TAG (OOM weak-point)
+		_, err := r.cli.Aggregate(ctx, to, "*",
+			"GROUPBY", 1, "@"+model.FieldChannel,
+			"REDUCE", "COUNT", 0, "AS", "n",
+			"SORTBY", 2, "@n", "DESC",
+			"LIMIT", 0, 10)
+		return err
+
+	case "deep_pagination": // large LIMIT offset (large-offset / OOM weak-point)
+		s, ok := r.orc.LiveSample()
+		if !ok {
+			return nil
+		}
+		offset := 0
+		if r.cfg.Query.PageDepth > 0 {
+			offset = rnd.Intn(r.cfg.Query.PageDepth)
+		}
+		t0 := time.Now().UnixMilli()
+		_, keys, err := r.cli.SearchLimit(ctx, "@"+model.FieldChannel+":{"+s.Channel+"} "+s.Token, offset, n, to)
+		if err != nil {
+			return err
+		}
+		checkKeys(keys, t0)
+		return nil
+
+	case "text_prefix": // TEXT prefix expansion (foo*)
+		s, ok := r.orc.LiveSample()
+		if !ok {
+			return nil
+		}
+		t0 := time.Now().UnixMilli()
+		_, keys, err := r.cli.Search(ctx, "@"+model.FieldChannel+":{"+s.Channel+"} "+prefixOf(s.Token), n, to)
+		if err != nil {
+			return err
+		}
+		checkKeys(keys, t0)
+		return nil
+	}
+	return nil
+}
+
+// channelFor returns a channel that likely has live data (from the oracle),
+// falling back to a random channel from the id-space.
+func (r *Runner) channelFor(pick *model.Picker) string {
+	if s, ok := r.orc.LiveSample(); ok {
+		return s.Channel
+	}
+	tid, _ := pick.Tenant()
+	_, ch := pick.ChannelID(tid)
+	return ch
+}
+
+// prefixOf turns a term into a prefix query (e.g. "deploy" -> "deplo*"). It is
+// rune-aware so unicode vocabulary words don't produce invalid UTF-8 prefixes.
+func prefixOf(w string) string {
+	rs := []rune(w)
+	if len(rs) <= 3 {
+		return w + "*"
+	}
+	return string(rs[:len(rs)-1]) + "*"
+}
+
 func (r *Runner) editor(ctx context.Context, lim *Limiter) {
-	gen := gendata.New(r.cfg.Seed, 999, r.cfg.Body.MinWords, r.cfg.Body.MaxWords)
+	gen := gendata.New(r.cfg.Seed, 999, r.cfg.Body.MinWords, r.cfg.Body.MaxWords, r.cfg.Body.VocabHigh)
 	for {
 		if ctx.Err() != nil {
 			return
@@ -301,6 +431,24 @@ func (r *Runner) metricLoop(ctx context.Context) {
 				CompactionCycles:  si.CompactionCycles,
 				PendingCompaction: si.PendingCompactionBytes,
 			}, si.DiskMode)
+			r.met.SetStatus(metrics.Status{
+				NumDocs:              fi.NumDocs,
+				NumRecords:           fi.NumRecords,
+				MaxDocID:             fi.MaxDocID,
+				InvertedMB:           fi.InvertedSzMB,
+				DocTableMB:           fi.DocTableSzMB,
+				TotalIndexMemMB:      fi.TotalIndexMemMB,
+				HashIndexingFailures: fi.HashIndexingFailures,
+				Indexing:             fi.Indexing,
+				PercentIndexed:       fi.PercentIndexed,
+				Cleaning:             fi.Cleaning,
+				DiskMode:             si.DiskMode,
+				DiskUsage:            si.DiskUsage,
+				UsedMem:              si.UsedMemory,
+				AsyncReadsExpired:    si.AsyncReadsExpired,
+				CompactionCycles:     si.CompactionCycles,
+				PendingCompaction:    si.PendingCompactionBytes,
+			})
 			r.orc.Prune()
 		}
 	}

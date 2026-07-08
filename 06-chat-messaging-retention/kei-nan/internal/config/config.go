@@ -39,6 +39,24 @@ type Tier struct {
 	TTL    Duration `yaml:"ttl"`
 }
 
+// QueryProfile is one high-level query kind and its relative weight in the mix.
+type QueryProfile struct {
+	Name   string `yaml:"name"`
+	Weight int    `yaml:"weight"`
+}
+
+// KnownProfiles is the set of query-profile names the workload can execute.
+// Each targets a disk query pattern / weak-point (see workload.go).
+var KnownProfiles = map[string]string{
+	"channel_search":  "full-text scoped to a channel TAG (the common case; recall-checked)",
+	"thread_search":   "full-text scoped to a thread TAG (high-cardinality posting lists)",
+	"tag_filter":      "retention-tier / tenant TAG filter + term",
+	"recent_timeline": "FT.AGGREGATE LOAD @ts + APPLY to_number + SORTBY (message timeline)",
+	"plan_analytics":  "FT.AGGREGATE GROUPBY high-cardinality TAG + REDUCE COUNT (wide groupby)",
+	"deep_pagination": "FT.SEARCH with a large LIMIT offset (OOM / large-offset weak-point)",
+	"text_prefix":     "TEXT prefix query foo* (prefix expansion)",
+}
+
 // Config is the full harness configuration.
 type Config struct {
 	Addr     string   `yaml:"addr"`
@@ -60,9 +78,12 @@ type Config struct {
 	} `yaml:"ingest"`
 
 	Query struct {
-		Workers int `yaml:"workers"`
-		Rate    int `yaml:"rate"`
-		Limit   int `yaml:"limit"`
+		Workers   int            `yaml:"workers"`
+		Rate      int            `yaml:"rate"`
+		Limit     int            `yaml:"limit"`
+		PageDepth int            `yaml:"page_depth"` // max offset for the deep-pagination profile
+		SlowMs    int            `yaml:"slow_ms"`    // a query at/above this latency counts as "slow" (timeout-risk)
+		Profiles  []QueryProfile `yaml:"profiles"`   // the high-level query mix
 	} `yaml:"query"`
 
 	Edit    struct{ Rate int } `yaml:"edit"`
@@ -70,8 +91,9 @@ type Config struct {
 	Sliding struct{ Rate int } `yaml:"sliding"`
 
 	Body struct {
-		MinWords int `yaml:"min_words"`
-		MaxWords int `yaml:"max_words"`
+		MinWords  int `yaml:"min_words"`
+		MaxWords  int `yaml:"max_words"`
+		VocabHigh int `yaml:"vocab_high"` // size of a synthetic high-cardinality term pool sprinkled into bodies (0 = base vocab only); stresses the pinned-RAM term dictionary
 	} `yaml:"body"`
 
 	Tiers []Tier `yaml:"tiers"`
@@ -113,8 +135,18 @@ func Default() *Config {
 	}
 	c.Ingest.Workers, c.Ingest.Rate, c.Ingest.Pipeline = 4, 2000, 200
 	c.Query.Workers, c.Query.Rate, c.Query.Limit = 4, 200, 20
+	c.Query.PageDepth, c.Query.SlowMs = 2000, 500
+	c.Query.Profiles = []QueryProfile{
+		{Name: "channel_search", Weight: 45},
+		{Name: "thread_search", Weight: 15},
+		{Name: "tag_filter", Weight: 10},
+		{Name: "recent_timeline", Weight: 15},
+		{Name: "plan_analytics", Weight: 5},
+		{Name: "deep_pagination", Weight: 5},
+		{Name: "text_prefix", Weight: 5},
+	}
 	c.Edit.Rate, c.Delete.Rate, c.Sliding.Rate = 50, 50, 100
-	c.Body.MinWords, c.Body.MaxWords = 6, 24
+	c.Body.MinWords, c.Body.MaxWords, c.Body.VocabHigh = 6, 24, 0
 	c.Tiers = []Tier{
 		{Name: "disappearing", Weight: 30, TTL: Duration(15 * time.Second)},
 		{Name: "free", Weight: 50, TTL: Duration(45 * time.Second)},
@@ -166,6 +198,23 @@ func (c *Config) Validate() error {
 	if c.Oracle.SampleRate <= 0 || c.Oracle.SampleRate > 1 {
 		return fmt.Errorf("oracle.sample_rate must be in (0,1]")
 	}
+	if len(c.Query.Profiles) == 0 {
+		return fmt.Errorf("at least one query profile is required")
+	}
+	if c.TotalProfileWeight() <= 0 {
+		return fmt.Errorf("query profile weights must sum to > 0")
+	}
+	for _, p := range c.Query.Profiles {
+		if _, ok := KnownProfiles[p.Name]; !ok {
+			return fmt.Errorf("unknown query profile %q (known: see config.KnownProfiles)", p.Name)
+		}
+	}
+	if c.Query.SlowMs <= 0 {
+		c.Query.SlowMs = 500
+	}
+	if c.Query.PageDepth < 0 {
+		c.Query.PageDepth = 0
+	}
 	return nil
 }
 
@@ -174,6 +223,15 @@ func (c *Config) TotalTierWeight() int {
 	sum := 0
 	for _, t := range c.Tiers {
 		sum += t.Weight
+	}
+	return sum
+}
+
+// TotalProfileWeight sums the query-profile weights.
+func (c *Config) TotalProfileWeight() int {
+	sum := 0
+	for _, p := range c.Query.Profiles {
+		sum += p.Weight
 	}
 	return sum
 }

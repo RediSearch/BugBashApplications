@@ -108,9 +108,20 @@ func (c *Client) Refresh(ctx context.Context, key string, ttl time.Duration) (bo
 }
 
 // Search runs a count-and-keys query: FT.SEARCH <idx> <q> NOCONTENT LIMIT 0 n DIALECT 2.
-// Returns the true total match count and up to n matching keys.
-func (c *Client) Search(ctx context.Context, query string, n int) (total int64, keys []string, err error) {
-	res, err := c.rdb.Do(ctx, "FT.SEARCH", c.index, query, "NOCONTENT", "LIMIT", 0, n, "DIALECT", 2).Slice()
+// Returns the true total match count and up to n matching keys. timeoutMs > 0
+// appends a per-query TIMEOUT.
+func (c *Client) Search(ctx context.Context, query string, n, timeoutMs int) (total int64, keys []string, err error) {
+	return c.SearchLimit(ctx, query, 0, n, timeoutMs)
+}
+
+// SearchLimit is Search with an explicit offset (for the deep-pagination profile).
+func (c *Client) SearchLimit(ctx context.Context, query string, offset, n, timeoutMs int) (total int64, keys []string, err error) {
+	args := []any{"FT.SEARCH", c.index, query, "NOCONTENT", "LIMIT", offset, n}
+	if timeoutMs > 0 {
+		args = append(args, "TIMEOUT", timeoutMs)
+	}
+	args = append(args, "DIALECT", 2)
+	res, err := c.rdb.Do(ctx, args...).Slice()
 	if err != nil {
 		return 0, nil, err
 	}
@@ -127,6 +138,27 @@ func (c *Client) Search(ctx context.Context, query string, n int) (total int64, 
 	return total, keys, nil
 }
 
+// Aggregate runs FT.AGGREGATE <idx> <args...> and returns the number of result
+// rows (best-effort). timeoutMs > 0 appends a per-query TIMEOUT.
+func (c *Client) Aggregate(ctx context.Context, timeoutMs int, args ...any) (rows int, err error) {
+	full := make([]any, 0, len(args)+4)
+	full = append(full, "FT.AGGREGATE", c.index)
+	full = append(full, args...)
+	if timeoutMs > 0 {
+		full = append(full, "TIMEOUT", timeoutMs)
+	}
+	res, err := c.rdb.Do(ctx, full...).Slice()
+	if err != nil {
+		return 0, err
+	}
+	// Reply is [count, row1, row2, ...]; treat everything after the leading
+	// count as a result row.
+	if len(res) <= 1 {
+		return 0, nil
+	}
+	return len(res) - 1, nil
+}
+
 // Doc returns a message's fields and its remaining whole-key TTL.
 func (c *Client) Doc(ctx context.Context, key string) (fields map[string]string, ttl time.Duration, err error) {
 	pipe := c.rdb.Pipeline()
@@ -138,14 +170,21 @@ func (c *Client) Doc(ctx context.Context, key string) (fields map[string]string,
 	return hg.Val(), pt.Val(), nil
 }
 
-// FtInfo returns selected FT.INFO fields for the index.
+// FtInfo returns the meaningful FT.INFO fields for a disk index. Fields that are
+// placeholders on Flex (offset_vectors_sz_mb, key_table_size_mb, etc.) are
+// deliberately omitted — see the MS2 Limitations doc.
 type FtInfo struct {
 	NumDocs                int64
 	MaxDocID               int64
 	NumRecords             int64
-	InvertedSzMB           float64
-	HashIndexingFailures   int64
+	InvertedSzMB           float64 // Speedb estimate
+	DocTableSzMB           float64 // Speedb estimate
+	TotalIndexMemMB        float64 // Speedb estimate
 	TotalInvertedIdxBlocks int64
+	HashIndexingFailures   int64
+	Indexing               int64   // 1 while a background index op is running
+	PercentIndexed         float64 // 0..1
+	Cleaning               int64   // 1 while GC/cleaning is running
 }
 
 // Info reads FT.INFO and extracts the index-level fields the harness watches.
@@ -167,10 +206,20 @@ func (c *Client) Info(ctx context.Context) (FtInfo, error) {
 			fi.NumRecords = toInt(val)
 		case "inverted_sz_mb":
 			fi.InvertedSzMB = toFloat(val)
-		case "hash_indexing_failures":
-			fi.HashIndexingFailures = toInt(val)
+		case "doc_table_size_mb":
+			fi.DocTableSzMB = toFloat(val)
+		case "total_index_memory_sz_mb":
+			fi.TotalIndexMemMB = toFloat(val)
 		case "total_inverted_index_blocks":
 			fi.TotalInvertedIdxBlocks = toInt(val)
+		case "hash_indexing_failures":
+			fi.HashIndexingFailures = toInt(val)
+		case "indexing":
+			fi.Indexing = toInt(val)
+		case "percent_indexed":
+			fi.PercentIndexed = toFloat(val)
+		case "cleaning":
+			fi.Cleaning = toInt(val)
 		}
 	}
 	return fi, nil

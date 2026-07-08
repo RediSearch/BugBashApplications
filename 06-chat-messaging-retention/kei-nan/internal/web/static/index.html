@@ -23,6 +23,7 @@
     </div>
   </header>
 
+  <!-- High-level status -->
   <section class="kpis" id="kpis"></section>
 
   <main class="grid">
@@ -30,7 +31,7 @@
     <section class="panel span2">
       <div class="panel-head">
         <h2>Live conversations</h2>
-        <span class="hint">messages are fetched live from the disk index (FT.SEARCH + HGETALL); watch TTLs count down and disappear</span>
+        <span class="hint">fetched live from the index (FT.SEARCH + HGETALL) — watch TTLs count down and expire</span>
       </div>
       <div class="conv">
         <div class="channels" id="channels"><div class="muted">loading channels…</div></div>
@@ -38,9 +39,57 @@
       </div>
     </section>
 
-    <!-- Search -->
+    <!-- Query controls -->
     <section class="panel">
-      <div class="panel-head"><h2>Interactive search</h2></div>
+      <div class="panel-head"><h2>Query controls</h2><span class="hint">live</span></div>
+      <div class="controls">
+        <div class="ctl-row">
+          <label>rate q/s<input id="c-rate" type="number" min="0" step="50" /></label>
+          <label>timeout ms<input id="c-timeout" type="number" min="0" step="50" title="0 = server default (500ms)" /></label>
+          <label>limit<input id="c-limit" type="number" min="1" step="10" /></label>
+        </div>
+        <button id="c-apply">Apply query settings</button>
+        <div class="mix-head">Query mix <span class="hint">weights → probability</span></div>
+        <div class="mix" id="mix"></div>
+        <button id="c-apply-mix">Apply mix</button>
+      </div>
+    </section>
+
+    <!-- Charts -->
+    <section class="panel span2">
+      <div class="panel-head"><h2>Database stats</h2><span class="hint" id="verdict-note"></span></div>
+      <div class="charts">
+        <figure><figcaption id="cap-foot">on-disk footprint</figcaption><canvas id="c-foot" height="170"></canvas></figure>
+        <figure><figcaption>indexed docs vs records</figcaption><canvas id="c-docs" height="170"></canvas></figure>
+        <figure><figcaption>ingest &amp; expire /s</figcaption><canvas id="c-rate2" height="170"></canvas></figure>
+        <figure><figcaption>query latency p50 / p99 (ms)</figcaption><canvas id="c-lat" height="170"></canvas></figure>
+      </div>
+    </section>
+
+    <!-- Index status -->
+    <section class="panel">
+      <div class="panel-head"><h2>Index status</h2><span class="hint">FT.INFO</span></div>
+      <div class="status" id="index-status"><div class="muted">waiting for first sample…</div></div>
+    </section>
+
+    <!-- Ad-hoc queries -->
+    <section class="panel span2">
+      <div class="panel-head"><h2>Ad-hoc queries</h2><span class="hint">generate → edit → send to the cluster</span></div>
+      <div class="adhoc">
+        <div class="adhoc-bar">
+          <label>count<input id="q-count" type="number" min="1" max="100" value="8" /></label>
+          <span class="chk" id="q-profiles"></span>
+          <button id="q-gen">Randomize</button>
+          <button id="q-send" class="primary">Send</button>
+        </div>
+        <textarea id="q-text" spellcheck="false" placeholder="one FT.SEARCH query body per line, e.g.  @channel_id:{c42} deploy"></textarea>
+        <div class="results" id="q-results"></div>
+      </div>
+    </section>
+
+    <!-- Interactive scoped search -->
+    <section class="panel">
+      <div class="panel-head"><h2>Scoped search</h2></div>
       <div class="search">
         <div class="fields">
           <label>channel <input id="s-channel" placeholder="c42" /></label>
@@ -53,26 +102,9 @@
         <div class="messages" id="s-results"><div class="muted">run a scoped full-text search</div></div>
       </div>
     </section>
-
-    <!-- Stats charts -->
-    <section class="panel span3">
-      <div class="panel-head">
-        <h2>Database stats</h2>
-        <span class="hint" id="verdict-note"></span>
-      </div>
-      <div class="charts">
-        <figure><figcaption id="cap-foot">on-disk footprint</figcaption><canvas id="c-foot" height="180"></canvas></figure>
-        <figure><figcaption>indexed docs vs records</figcaption><canvas id="c-docs" height="180"></canvas></figure>
-        <figure><figcaption>ingest &amp; query throughput</figcaption><canvas id="c-rate" height="180"></canvas></figure>
-        <figure><figcaption>query latency (ms)</figcaption><canvas id="c-lat" height="180"></canvas></figure>
-      </div>
-    </section>
   </main>
 
-  <footer class="foot">
-    <span id="tiers"></span>
-  </footer>
-
+  <footer class="foot"><span id="tiers"></span></footer>
   <script src="/app.js"></script>
 </body>
 </html>

@@ -18,6 +18,7 @@ type Counters struct {
 	Refreshed    atomic.Int64
 	Queries      atomic.Int64
 	QueryErrors  atomic.Int64
+	SlowQueries  atomic.Int64 // latency >= configured slow threshold (timeout-risk)
 }
 
 // latBoundsMs are the upper bounds (ms) of the latency histogram buckets.
@@ -92,15 +93,82 @@ type Metrics struct {
 	mu       sync.RWMutex
 	series   []Sample
 	diskMode bool
+
+	profMu     sync.Mutex
+	profCounts map[string]int64
+
+	statusMu sync.RWMutex
+	status   Status
+}
+
+// Status is the latest overall index status (FT.INFO + INFO), refreshed by the
+// sampler. Fields that are placeholders on Flex are deliberately excluded.
+type Status struct {
+	// FT.INFO (index-level)
+	NumDocs              int64   `json:"num_docs"`
+	NumRecords           int64   `json:"num_records"`
+	MaxDocID             int64   `json:"max_doc_id"`
+	InvertedMB           float64 `json:"inverted_sz_mb"`
+	DocTableMB           float64 `json:"doc_table_size_mb"`
+	TotalIndexMemMB      float64 `json:"total_index_memory_sz_mb"`
+	HashIndexingFailures int64   `json:"hash_indexing_failures"`
+	Indexing             int64   `json:"indexing"`
+	PercentIndexed       float64 `json:"percent_indexed"`
+	Cleaning             int64   `json:"cleaning"`
+	// INFO (process / disk)
+	DiskMode          bool  `json:"disk_mode"`
+	DiskUsage         int64 `json:"disk_usage"`
+	UsedMem           int64 `json:"used_mem"`
+	AsyncReadsExpired int64 `json:"async_reads_expired"`
+	CompactionCycles  int64 `json:"compaction_cycles"`
+	PendingCompaction int64 `json:"pending_compaction"`
+}
+
+// SetStatus stores the latest index status.
+func (m *Metrics) SetStatus(s Status) {
+	m.statusMu.Lock()
+	m.status = s
+	m.statusMu.Unlock()
+}
+
+// Status returns the latest index status.
+func (m *Metrics) Status() Status {
+	m.statusMu.RLock()
+	defer m.statusMu.RUnlock()
+	return m.status
 }
 
 // New returns an initialized Metrics.
 func New() *Metrics {
-	return &Metrics{Lat: newHist(), start: time.Now()}
+	return &Metrics{Lat: newHist(), start: time.Now(), profCounts: map[string]int64{}}
 }
 
 // Elapsed since start.
 func (m *Metrics) Elapsed() time.Duration { return time.Since(m.start) }
+
+// RecordQuery records one completed query: its latency, the query counter, a
+// slow-query tick if it crossed the timeout-risk threshold, and its profile tally.
+func (m *Metrics) RecordQuery(profile string, d time.Duration, slowMs int) {
+	m.Lat.Record(d)
+	m.C.Queries.Add(1)
+	if float64(d)/float64(time.Millisecond) >= float64(slowMs) {
+		m.C.SlowQueries.Add(1)
+	}
+	m.profMu.Lock()
+	m.profCounts[profile]++
+	m.profMu.Unlock()
+}
+
+// ProfileCounts returns a copy of the per-profile query tallies.
+func (m *Metrics) ProfileCounts() map[string]int64 {
+	m.profMu.Lock()
+	defer m.profMu.Unlock()
+	out := make(map[string]int64, len(m.profCounts))
+	for k, v := range m.profCounts {
+		out[k] = v
+	}
+	return out
+}
 
 // AddSample appends a footprint observation.
 func (m *Metrics) AddSample(s Sample, diskMode bool) {

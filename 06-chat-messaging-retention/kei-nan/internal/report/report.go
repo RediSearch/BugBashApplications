@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -75,11 +76,13 @@ type Summary struct {
 	Refreshed    int64            `json:"refreshed"`
 	Queries      int64            `json:"queries"`
 	QueryErrors  int64            `json:"query_errors"`
+	SlowQueries  int64            `json:"slow_queries"`
 	P50ms        float64          `json:"p50_ms"`
 	P99ms        float64          `json:"p99_ms"`
 	Oracle       oracle.Stats     `json:"oracle"`
 	StaleHits    int64            `json:"stale_hits"`
 	Footprint    metrics.Verdict  `json:"footprint"`
+	Profiles     map[string]int64 `json:"profiles"`
 	Samples      []metrics.Sample `json:"-"`
 }
 
@@ -94,11 +97,13 @@ func (r *Reporter) Finalize(cfg *config.Config) (Summary, error) {
 		Refreshed:    r.met.C.Refreshed.Load(),
 		Queries:      r.met.C.Queries.Load(),
 		QueryErrors:  r.met.C.QueryErrors.Load(),
+		SlowQueries:  r.met.C.SlowQueries.Load(),
 		P50ms:        r.met.Lat.Percentile(0.50),
 		P99ms:        r.met.Lat.Percentile(0.99),
 		Oracle:       r.orc.Stats(),
 		StaleHits:    r.orc.StaleHits(),
 		Footprint:    r.met.Plateau(),
+		Profiles:     r.met.ProfileCounts(),
 		Samples:      r.met.Series(),
 	}
 	if err := os.MkdirAll(cfg.OutDir, 0o755); err != nil {
@@ -124,7 +129,10 @@ func (s Summary) Text() string {
 	fmt.Fprintf(&b, "duration:        %.0fs\n", s.DurationSec)
 	fmt.Fprintf(&b, "ingested:        %d (errors %d)\n", s.Ingested, s.IngestErrors)
 	fmt.Fprintf(&b, "mutations:       edited %d, deleted %d, refreshed %d\n", s.Edited, s.Deleted, s.Refreshed)
-	fmt.Fprintf(&b, "queries:         %d (errors %d)  p50 %.1fms  p99 %.1fms\n", s.Queries, s.QueryErrors, s.P50ms, s.P99ms)
+	fmt.Fprintf(&b, "queries:         %d (errors %d, slow %d)  p50 %.1fms  p99 %.1fms\n", s.Queries, s.QueryErrors, s.SlowQueries, s.P50ms, s.P99ms)
+	if len(s.Profiles) > 0 {
+		fmt.Fprintf(&b, "query mix:       %s\n", formatProfiles(s.Profiles))
+	}
 	fmt.Fprintf(&b, "recall:          ok %d, miss %d\n", s.Oracle.RecallOK, s.Oracle.RecallMiss)
 	fmt.Fprintf(&b, "probes(expired): %d, stale-on-probe %d\n", s.Oracle.Probes, s.Oracle.ProbeStale)
 	fmt.Fprintf(&b, "STALE HITS:      %d (expired %d, deleted %d, probe %d)  -> correctness %s\n",
@@ -143,6 +151,24 @@ func plateauLabel(p bool) string {
 		return "PLATEAU"
 	}
 	return "GROWING"
+}
+
+// formatProfiles renders per-profile query counts sorted by count, descending.
+func formatProfiles(p map[string]int64) string {
+	type kv struct {
+		k string
+		v int64
+	}
+	kvs := make([]kv, 0, len(p))
+	for k, v := range p {
+		kvs = append(kvs, kv{k, v})
+	}
+	sort.Slice(kvs, func(i, j int) bool { return kvs[i].v > kvs[j].v })
+	parts := make([]string, 0, len(kvs))
+	for _, e := range kvs {
+		parts = append(parts, fmt.Sprintf("%s=%d", e.k, e.v))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func writeJSON(path string, v any) error {

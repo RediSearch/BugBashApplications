@@ -3,25 +3,23 @@
 `chatstress` is a stress-test harness for **use case 6** — a multi-tenant chat
 archive where every message is written with a **whole-key TTL** and ingest +
 expiration run continuously in parallel. It hammers the on-disk index on the
-axes that matter for retention workloads and ships a **live web dashboard** so
-you can watch the generated conversations expire and inspect DB stats in real
-time.
+axes that matter for retention workloads, deliberately probes the documented
+Flex **weak-points**, and ships a **live web dashboard** with high-level status,
+an index-status panel, tunable query controls, and an ad-hoc query editor.
 
 ## What this app does
 
 It simulates a messaging backend: tenants → channels → users → threads →
-messages. A pool of workers continuously **ingests** messages (each `HSET` + a
-whole-key `PEXPIRE`), while other workers **refresh** TTLs on active threads
-(sliding expiration), **edit** and **delete** messages, and run **channel- /
-user- / thread-scoped full-text queries**. Messages expire on their own via
-Redis key expiry, so at steady state the expire-rate converges on the
-ingest-rate — exactly the "continuous deletion stream" this use case targets.
+messages. Workers continuously **ingest** messages (`HSET` + whole-key `PEXPIRE`),
+**refresh** TTLs on active threads (sliding expiration), **edit** and **delete**
+messages, and run a configurable **mix of query profiles**. Messages expire on
+their own via Redis key expiry, so at steady state expire-rate ≈ ingest-rate.
 
 A client-side **correctness oracle** verifies the headline property — **no stale
 hits**: a document that has expired (or was deleted comfortably in the past) must
-never appear in query results. A **web dashboard** (served by the harness itself)
-shows the live conversations, an interactive scoped-search box, and charts of the
-DB stats (footprint over time, indexed docs vs records, throughput, latency).
+never appear in query results. The **web dashboard** (served by the harness)
+shows high-level status, the live conversations, index status, and lets you
+tune the query workload and fire ad-hoc queries at the cluster in real time.
 
 ## Schema
 
@@ -37,109 +35,152 @@ FT.CREATE chat ON HASH PREFIX 1 msg: SKIPINITIALSCAN SCHEMA
   plan       TAG            # retention tier name
 ```
 
-- **`SKIPINITIALSCAN` is required** and the index is created **before** any data
-  is loaded (existing keys are not back-indexed on disk).
-- Each message HASH also carries unindexed `seq` and `ts` fields (used only for
-  client-side "recent first" ordering — there is **no `NUMERIC` field**, per the
-  disk constraints; retention is modeled as a `plan` **TAG**).
-- Whole-key TTL via `PEXPIRE` (hash-field TTL is intentionally **not** used — it
-  isn't reflected in the disk index).
+- **`SKIPINITIALSCAN` is required**; the index is created **before** any data
+  (existing keys aren't back-indexed on disk).
+- **No `NUMERIC`** — retention is a `plan` **TAG**. Each message HASH also stores
+  unindexed `seq` and `ts` fields (used for client-side ordering and for the
+  `recent_timeline` aggregate, which `LOAD`s `@ts` and orders it with
+  `APPLY to_number(@ts)` — numeric `SORTBY` sorts lexicographically on Flex).
+- Whole-key TTL via `PEXPIRE` (hash-field TTL is **not** reflected in the index).
+
+**Do we need offsets / which schema keywords?** On Flex the only accepted
+`FT.CREATE` args are `ON, PREFIX, FILTER, LANGUAGE(_FIELD), SCORE(_FIELD),
+STOPWORDS, SKIPINITIALSCAN` — `NOOFFSETS`, `NOFREQS`, `NOHL`, `NOFIELDS` are all
+**rejected**. So term offsets are **always stored** and can't be turned off; they
+live **on disk** in Speedb, not in pinned RAM. The pinned-RAM cost is instead the
+**TEXT term dictionary**, which scales with the number of *distinct* terms
+(~100 MB per 1M terms). That is the real schema-level lever and a Flex weak-point,
+so the generator can inflate distinct-term count via `body.vocab_high` (see below)
+rather than trying to trim offsets. Stemming is left on (chat search benefits).
 
 ## Dataset & scale
 
-- **Source:** synthetic generator (`internal/gendata`) — bodies are drawn from a
-  fixed content-word vocabulary (no stopwords, so any body word is a valid search
-  term; a few unicode words exercise multilingual tokenization).
-- **Size:** driven by config. `config/bugbash.yaml` uses a large id-space
-  (5k tenants × 200 channels, millions of users/threads) and unbounded ingest so
-  total bytes exceed the server's RAM budget — the point of on-disk indexes.
-- **Ingestion:** pipelined `HSET`+`PEXPIRE` batches across N workers. TTLs are
-  drawn from a weighted **retention-tier mix** (disappearing / free / pro /
-  enterprise) so short- and long-lived docs coexist in one index.
+- **Source:** synthetic generator (`internal/gendata`) — bodies from a content-word
+  vocabulary (no stopwords; a few unicode words exercise tokenization).
+- **`body.vocab_high`:** sprinkles synthetic unique-ish terms into bodies to grow
+  the on-disk term dictionary (the pinned-RAM weak-point). `bugbash.yaml` sets 5M.
+- **Size:** `config/bugbash.yaml` uses a large id-space (5k tenants × 200 channels,
+  millions of users/threads) and unbounded ingest so total bytes exceed RAM.
+- **Ingestion:** pipelined `HSET`+`PEXPIRE`; TTLs from a weighted **retention-tier
+  mix** (disappearing / free / pro / enterprise) so short- and long-lived docs
+  coexist in one index.
 
 ## How to run
 
-**Prerequisites:** Docker (the build uses a `golang:1.23-alpine` container — no
-host Go needed) and a Redis to point at. The real disk path needs a
-**Flex/BigRedis-capable** server (a plain OSS `redis-server` has no on-disk
-search); see [`deploy/flex-redis.conf`](deploy/flex-redis.conf).
+**Prerequisites:** Docker (build uses a `golang:1.23-alpine` container — no host
+Go needed) and a Redis. The real disk path needs a **Flex/BigRedis** server (see
+[`deploy/flex-redis.conf`](deploy/flex-redis.conf)); plain OSS Redis has no on-disk
+search but works for exercising the harness in-RAM.
 
 ```bash
-# 1. Build the static binary (via Docker Go toolchain)
 ./build.sh              # -> ./bin/chatstress    (or: make build)
 
-# 2a. Real disk run: start a Flex server, then point the harness at it
-redis-server deploy/flex-redis.conf              # loadmodule = your redisearch.so
+# Real disk run against a Flex server:
+redis-server deploy/flex-redis.conf
 ./bin/chatstress run -config config/bugbash.yaml -addr 127.0.0.1:6379
 
-# 2b. In-RAM smoke run (validates the harness logic only — NOT the disk path)
-REDIS_MODULE=/path/to/redisearch.so PORT=6399 ./scripts/local-redis.sh start
-./bin/chatstress run -flush -config config/smoke.yaml -addr 127.0.0.1:6399
+# Demo / in-RAM (e.g. Redis Stack or OSS redis + module):
+docker run -d --rm -p 6379:6379 redis/redis-stack-server:latest
+./bin/chatstress run -flush -config config/smoke.yaml -addr 127.0.0.1:6379
 
-# 3. Restart / RDB-reload correctness check
-./bin/chatstress reload-check -config config/smoke.yaml -addr 127.0.0.1:6399
+# Restart / RDB-reload correctness check:
+./bin/chatstress reload-check -config config/smoke.yaml -addr 127.0.0.1:6379
 ```
 
-Then open the dashboard: **http://localhost:8080**. The dashboard stays up after
-the run completes so you can inspect the final state (Ctrl-C to exit).
+Open the dashboard at **http://localhost:8080**. It stays up after the run
+completes so you can inspect the final state (Ctrl-C to exit). Confirm the disk
+path is live with `redis-cli INFO search | grep search_disk_usage`.
 
-Confirm the disk path is actually live: `redis-cli INFO search | grep search_disk_usage`
-(that field only appears for a disk-backed index).
+Flags: `-addr`, `-config`, `-duration`, `-web-addr`, `-flush`, `-no-web`, `-seed`.
 
-Key flags: `-addr`, `-config`, `-duration`, `-web-addr`, `-flush`, `-no-web`,
-`-seed`. Everything else (scale, worker counts, rates, TTL tiers, sampling,
-oracle sampling) is in the YAML config.
+## Workload / query profiles
 
-## Workload / queries
+The query mix is a **weighted set of profiles** (in the config and **tunable live
+from the dashboard**). Each targets a disk pattern / weak-point:
 
-| Worker | What it drives |
-| ------ | -------------- |
-| ingesters | `HSET` + whole-key `PEXPIRE` (pipelined), tier-weighted TTLs |
-| sliding-TTL refresher | re-`PEXPIRE` messages on active threads (TTL-update path) |
-| editor | `HSET body` on a live message (re-index) |
-| deleter | `UNLINK` a live message (de-index) |
-| query workers | `FT.SEARCH chat "@channel_id:{c…} <term>" NOCONTENT LIMIT 0 N DIALECT 2`; 15% run unscoped term queries to stress high-cardinality posting lists |
+| Profile | Command | Targets |
+| ------- | ------- | ------- |
+| `channel_search` | `FT.SEARCH @channel_id:{c} term` | the common case; recall-checked |
+| `thread_search` | `FT.SEARCH @thread_id:{th} term` | high-cardinality TAG posting lists |
+| `tag_filter` | `FT.SEARCH @plan:{tier}\|@tenant_id:{t} term` | retention-tier / tenant filtering |
+| `recent_timeline` | `FT.AGGREGATE … LOAD @ts APPLY to_number SORTBY DESC` | LOAD of unindexed field + numeric sort |
+| `plan_analytics` | `FT.AGGREGATE * GROUPBY @channel_id REDUCE COUNT` | wide GROUPBY (OOM / max-aggregate-groups) |
+| `deep_pagination` | `FT.SEARCH … LIMIT <big offset> n` | large-offset / OOM-during-execution |
+| `text_prefix` | `FT.SEARCH @channel_id:{c} pre*` | TEXT prefix expansion |
 
-Rates, worker counts and durations are all configurable. Expiry itself needs no
-worker — Redis expires keys and the index excludes them at query time.
+Other workers: sliding-TTL refresher (`PEXPIRE`), editor (`HSET body`, re-index),
+deleter (`UNLINK`, de-index). Ingest/edit/delete rates come from the config; the
+**query rate, per-query `TIMEOUT`, result `LIMIT`, and profile mix are live-tunable
+from the UI**.
+
+### Disk weak-points this exercises
+
+- **Term-dictionary RAM** (pinned, scales with distinct terms) via `vocab_high`.
+- **Query timeout** — 500 ms default returns *partial results silently*; the
+  harness flags queries ≥ `slow_ms` as "slow" and lets you set a per-query
+  `TIMEOUT` from the UI.
+- **OOM guardrail** — only checks *before* a query; `deep_pagination` (large
+  offset) and `plan_analytics` (wide GROUPBY) push the during-execution path.
+- **TTL churn** — continuous expiry as a deletion stream; footprint-plateau check.
+- **GC under delete bursts** and **compaction** — sampled via `INFO`.
+
+> `FT.AGGREGATE` on Flex is version-dependent (enabled by MOD-16604 /
+> `e555decfb`); the harness executes aggregate profiles error-tolerantly, and
+> they run fully on Redis Stack / OSS for the demo.
+
+## Web dashboard
+
+- **High-level KPIs:** messages retained, ingesting/s, expiring/s, footprint (+
+  plateau badge), stale results (correctness), query p99, slow queries, recall.
+- **Live conversations:** browse channels; messages fetched live via `FT.SEARCH`
+  + `HGETALL` with TTL countdowns.
+- **Index status (FT.INFO):** `num_docs`, `num_records`, `inverted_sz_mb`,
+  `doc_table_size_mb`, `total_index_memory_sz_mb`, `hash_indexing_failures`,
+  `indexing`, `percent_indexed`, GC/cleaning — plus disk `INFO`
+  (`search_disk_usage`, `async_reads_expired`, compaction). Placeholder-on-Flex
+  fields (offset/key-table sizes, etc.) are intentionally omitted.
+- **Query controls:** rate / timeout / limit + the profile-weight mix, applied live.
+- **Ad-hoc queries:** pick a count and profiles, **Randomize** to generate editable
+  `FT.SEARCH` query bodies, edit them, and **Send** them to the cluster to see
+  per-query total / latency / key count / errors.
+- **Charts:** footprint over time, docs vs records, ingest & expire /s, query p50/p99.
 
 ## What to watch
 
-- **No stale hits (correctness).** For every query the oracle captures `t0`
-  before issuing it; a returned doc is a violation if it expired at/​before `t0`
-  (strict — expiry has a synchronous read-time filter) or was deleted more than a
-  grace window before `t0` (deletion de-indexes asynchronously). A separate probe
-  repeatedly searches for **known-expired** docs and asserts they're absent. The
-  dashboard shows a red badge and the summary reports `FAIL` if any occur.
-- **Footprint plateau.** The sampler reads `search_disk_usage` and `FT.INFO`
-  (`num_docs`, `num_records`, `inverted_sz_mb`) over time and fits a slope over
-  the steady-state window → **PLATEAU vs GROWING**. Under expiry churn at steady
-  state, on-disk footprint should plateau rather than grow unbounded.
-- **GC / compaction.** Periodically forces `_FT.DEBUG DISK_FLUSH` +
-  `GC_FORCEINVOKE` (best-effort; no-op off the disk path) and samples
-  `compaction_total_cycles` / `estimate_pending_compaction_bytes` /
-  `async_reads_expired`.
-- **Query latency** (p50/p90/p99) and **throughput** (ingest/s, query/s).
-- **Post-restart correctness** via `reload-check` (`DEBUG RELOAD` = RDB
-  save+load): expired docs stay gone, live docs survive, no stale hits.
+- **No stale hits (correctness).** Per query the oracle captures `t0` before
+  issuing; a returned doc is a violation if it expired at/before `t0` (strict —
+  expiry has a synchronous read-time filter) or was deleted more than a grace
+  window before `t0` (deletion de-indexes asynchronously). A probe repeatedly
+  searches for known-expired docs and asserts they're absent.
+- **Footprint plateau.** Slope over the steady-state window → PLATEAU vs GROWING.
+- **Index status & term dictionary**, **GC/compaction**, **query latency & slow/
+  timeout counts**, and **post-restart correctness** via `reload-check`.
 
-Artifacts are written to `./out/` (`summary.json`, `metrics.csv`).
+Artifacts: `./out/summary.json`, `./out/metrics.csv`.
 
 ## Local validation performed
 
-Smoke-tested in-RAM against a local OSS `redis-server` + the disk-capable
-`redisearch.so` (in-RAM mode — the harness's `search_disk_*` sampling degrades
-gracefully when those fields are absent). Over a 30s run at 2k msg/s + 200 q/s:
-index created, ingest/expiry churn observed, **0 stale hits** (524 expired-doc
-probes, all absent), ~98% recall, and `reload-check` passed (live docs preserved,
-expired docs absent before and after `DEBUG RELOAD`).
+Built via the Go container and smoke-tested in-RAM against both a local
+`redisearch.so` and a **Redis Stack** container. All dashboard endpoints work
+(stats, control GET/POST, gen-queries, run-queries, channels, messages, search);
+the profile mix and query rate/timeout are live-tunable; the ad-hoc editor
+generates, edits and runs queries. `reload-check` passes (live docs preserved,
+expired absent before/after `DEBUG RELOAD`).
 
-> The disk path itself must be exercised on a provisioned Flex/BigRedis server —
-> it can't run against plain OSS Redis.
+> **Finding (OSS vs Enterprise, in-RAM):** under sustained TTL churn, stock OSS
+> RediSearch (Redis Stack) returns **expired-but-not-yet-reaped** documents —
+> thousands of stale hits — while the RediSearchEnterprise/disk build filters
+> expired docs at query time (**0 stale hits** on the identical workload). This is
+> exactly the no-stale-hits guarantee use case 6 targets.
+
+> The disk path itself (SpeedB, pinned-RAM term dictionary, `search_disk_usage`,
+> compaction) must be exercised on a provisioned Flex/BigRedis server.
 
 ## Findings
 
 _To be filled in during the bug bash. Link any tickets you open (e.g. MOD-XXXXX)._
 
-- _(footprint plateau vs growth under sustained expiry churn — attach `metrics.csv` / dashboard screenshots)_
+- _(footprint plateau vs growth under sustained expiry churn — attach `metrics.csv` / screenshots)_
+- _(term-dictionary RAM growth with `vocab_high`; RAM-quota write rejection?)_
+- _(timeout partial-results / slow-query behavior; deep-pagination & wide-GROUPBY under load)_
 - _(any stale hits, recall anomalies, GC/compaction surprises, restart/RDB issues)_
