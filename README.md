@@ -5,8 +5,8 @@ during the bug bash. Each application drives realistic ingestion and query patte
 **at scale** against on-disk indexes, so we get broad coverage of the surface and
 shake out bugs.
 
-> **Use-case catalog (source of truth):**
-> [Redis Search on Disk – MS2 – Use-cases](https://redislabs.atlassian.net/wiki/spaces/DX/pages/6484329496/Redis+Search+on+Disk+-+MS2+-+Use-cases)
+> **Use-case catalog (source of truth):** the internal design doc
+> *Redis Search on Disk — MS2 — Use-cases*.
 
 ## Guiding principle
 
@@ -42,8 +42,8 @@ so there are no collisions.
 
 ## How to contribute an application
 
-1. **Pick a use case** below (or add a new one — mirror it on the Confluence page and add a folder here following the same layout).
-2. **Claim it** on the [Confluence page](https://redislabs.atlassian.net/wiki/spaces/DX/pages/6484329496/Redis+Search+on+Disk+-+MS2+-+Use-cases): add yourself as an **Owner** and flip the status to **IN PROGRESS**.
+1. **Pick a use case** below (or add a new one — mirror it in the use-case doc and add a folder here following the same layout).
+2. **Claim it** in the internal *Redis Search on Disk — MS2 — Use-cases* doc: add yourself as an **Owner** and flip the status to **IN PROGRESS**.
 3. **Copy** that use case's `_TEMPLATE/` folder and rename the copy to your **GitHub username**.
 4. **Build** your app inside that folder and fill in its `README.md`.
-5. **Log findings** — link any bugs/tickets you open in your README, and flip the Confluence status to **DONE** when you're finished.
+5. **Log findings** — link any bugs/tickets you open in your README, and flip your status in the use-case doc to **DONE** when you're finished.

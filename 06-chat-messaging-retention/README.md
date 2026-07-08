@@ -1,6 +1,6 @@
 # Use case 6 — Chat / messaging with retention (HASH)
 
-> Part of [Bug Bash Applications](../README.md) · [Confluence use-case catalog](https://redislabs.atlassian.net/wiki/spaces/DX/pages/6484329496/Redis+Search+on+Disk+-+MS2+-+Use-cases)
+> Part of [Bug Bash Applications](../README.md) · use-case catalog: internal doc *Redis Search on Disk — MS2 — Use-cases*
 
 * **Domain:** multi-tenant messaging archive — billions of messages across millions of channels/users, **each written with a TTL**. Covers disappearing messages (hours–days), free-tier retention windows (e.g. 90 days), and per-plan retention tiers (short- and long-lived docs coexisting in one index). Ingest and expiration run continuously in parallel.
 * **Schema:** TEXT (message body), TAG (tenant_id, channel_id, user_id, thread_id). Per-message key TTL via `EXPIRE`; optional sliding TTL refreshed on thread activity.

@@ -1,6 +1,6 @@
 # Use case 3 — Log / observability archive (HASH)
 
-> Part of [Bug Bash Applications](../README.md) · [Confluence use-case catalog](https://redislabs.atlassian.net/wiki/spaces/DX/pages/6484329496/Redis+Search+on+Disk+-+MS2+-+Use-cases)
+> Part of [Bug Bash Applications](../README.md) · use-case catalog: internal doc *Redis Search on Disk — MS2 — Use-cases*
 
 * **Domain:** very high-volume, append-only log lines.
 * **Schema:** TEXT (message), TAG (service, level, host).

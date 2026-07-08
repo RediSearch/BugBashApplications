@@ -1,6 +1,6 @@
 # Use case 1 — E-commerce product catalog (HASH)
 
-> Part of [Bug Bash Applications](../README.md) · [Confluence use-case catalog](https://redislabs.atlassian.net/wiki/spaces/DX/pages/6484329496/Redis+Search+on+Disk+-+MS2+-+Use-cases)
+> Part of [Bug Bash Applications](../README.md) · use-case catalog: internal doc *Redis Search on Disk — MS2 — Use-cases*
 
 * **Domain:** millions of SKUs — the canonical "too big for RAM" catalog.
 * **Schema:** TEXT (title, description), TAG (brand, category, color).
