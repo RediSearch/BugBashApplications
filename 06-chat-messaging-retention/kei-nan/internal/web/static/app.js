@@ -249,17 +249,12 @@ async function applyControl() {
   };
   try { await postJSON("/api/control", body); loadControl(); } catch (e) {}
 }
-function randomizeTypes() {
-  const rows = [...document.querySelectorAll("#mix .mixrow")];
-  let anyOn = false;
-  rows.forEach((row) => {
-    const on = Math.random() < 0.6; if (on) anyOn = true;
-    const cb = row.querySelector(".mx-on"), wt = row.querySelector(".mx-wt");
-    cb.checked = on; row.classList.toggle("off", !on); wt.disabled = !on;
-    wt.value = 1 + Math.floor(Math.random() * 20);
-  });
-  if (!anyOn) { const cb = rows[0].querySelector(".mx-on"); cb.checked = true; rows[0].classList.remove("off"); rows[0].querySelector(".mx-wt").disabled = false; }
-  applyControl();
+async function fuzzNow() {
+  const btn = document.getElementById("c-fuzz");
+  btn.disabled = true; const prev = btn.textContent; btn.textContent = "🎲 firing…";
+  try { await postJSON("/api/fuzz", { count: 15 }); await refreshFeed(); }
+  catch (e) {}
+  finally { btn.disabled = false; btn.textContent = prev; }
 }
 
 // ---------- conversations + inline inspect search ----------
@@ -314,27 +309,47 @@ async function loadConfig() {
     document.getElementById("tiers").textContent = "retention tiers: " + c.tiers.map((t) => `${t.name} (${t.ttl}, w${t.weight})`).join("  ·  ");
   } catch (e) {}
 }
-async function refreshFeed() {
-  try {
-    const qs = await getJSON("/api/recent-queries");
-    const el = document.getElementById("feed");
-    if (!qs.length) { el.innerHTML = '<div class="muted">waiting for queries…</div>'; return; }
-    el.innerHTML = qs.map((q) => {
-      const cls = "fq" + (q.err ? " err" : "") + (q.ms >= 500 ? " slow" : "");
-      const t = q.err ? "ERR" : fmtNum(q.total);
-      return `<div class="${cls}"><span class="fp ${q.profile}">${q.profile}</span>` +
-        `<span class="fcmd">${escapeHtml(q.query)}</span>` +
-        `<span class="ft" title="${q.err ? escapeHtml(q.err) : "matches/rows"}">${t}</span>` +
-        `<span class="fm">${q.ms.toFixed(1)}ms</span></div>`;
-    }).join("");
-  } catch (e) {}
+let feedData = [];
+const feedSort = { k: "t", dir: -1 }; // default: newest first
+
+function renderFeed() {
+  const body = document.getElementById("feedbody");
+  if (!feedData.length) { body.innerHTML = '<tr><td colspan="5" class="muted">waiting for queries…</td></tr>'; return; }
+  const k = feedSort.k, dir = feedSort.dir;
+  const rows = feedData.slice().sort((a, b) => {
+    let av = a[k], bv = b[k];
+    if (k === "query" || k === "profile") { av = (av || "").toString(); bv = (bv || "").toString(); return dir * av.localeCompare(bv); }
+    return dir * ((av || 0) - (bv || 0));
+  });
+  body.innerHTML = rows.map((q) => {
+    const cls = (q.err ? "err " : "") + (q.ms >= 500 ? "slow" : "");
+    const t = q.err ? "ERR" : fmtNum(q.total);
+    return `<tr class="${cls}"><td>${q.t.toFixed(0)}</td>` +
+      `<td class="fp ${q.profile}">${q.profile}</td>` +
+      `<td class="fcmd">${escapeHtml(q.query)}</td>` +
+      `<td class="ft" title="${q.err ? escapeHtml(q.err) : "matches/rows"}">${t}</td>` +
+      `<td class="fm">${q.ms.toFixed(1)}</td></tr>`;
+  }).join("");
+  document.querySelectorAll(".feedtbl th.sortable").forEach((th) => {
+    const base = th.dataset.k === "t" ? "t (s)" : th.dataset.k === "profile" ? "type" : th.dataset.k === "query" ? "query" : th.dataset.k === "total" ? "matches" : "ms";
+    th.innerHTML = base + (th.dataset.k === k ? ` <span class="arrow">${dir < 0 ? "▼" : "▲"}</span>` : "");
+  });
 }
+async function refreshFeed() {
+  try { feedData = await getJSON("/api/recent-queries"); renderFeed(); } catch (e) {}
+}
+document.querySelectorAll(".feedtbl th.sortable").forEach((th) =>
+  th.addEventListener("click", () => {
+    const k = th.dataset.k;
+    if (feedSort.k === k) feedSort.dir *= -1; else { feedSort.k = k; feedSort.dir = (k === "query" || k === "profile") ? 1 : -1; }
+    renderFeed();
+  }));
 
 async function tickStats() { try { renderStats(await getJSON("/api/stats")); } catch (e) {} }
 
 loadConfig(); loadControl(); tickStats(); refreshChannels(); refreshMessages(); refreshFeed();
 document.getElementById("c-apply").addEventListener("click", applyControl);
-document.getElementById("c-randomize").addEventListener("click", randomizeTypes);
+document.getElementById("c-fuzz").addEventListener("click", fuzzNow);
 document.getElementById("s-run").addEventListener("click", refreshMessages);
 document.getElementById("s-clear").addEventListener("click", () => { document.getElementById("s-text").value = ""; refreshMessages(); });
 document.getElementById("s-text").addEventListener("keydown", (e) => { if (e.key === "Enter") refreshMessages(); });

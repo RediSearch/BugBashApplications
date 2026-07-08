@@ -114,6 +114,17 @@ guards the numeric sort with `FILTER exists(@ts)` so an expired-but-unreclaimed
 doc returned by the match doesn't make `to_number(@ts)` throw during `SORTBY`.)
 | `deep_pagination` | `FT.SEARCH … LIMIT <big offset> n` | large-offset / OOM-during-execution |
 | `text_prefix` | `FT.SEARCH @channel_id:{c} pre*` | TEXT prefix expansion |
+| `fuzz` | fully-randomized FT.SEARCH / FT.AGGREGATE | broad fuzz testing of the whole supported query surface |
+
+The **`fuzz`** profile (and the dashboard's **🎲 Randomize queries** button / the
+`/api/fuzz` endpoint) composes random **disk-legal** queries across the whole
+supported surface — a grammar derived from RediSearch's `commands.json` (the
+FT.SEARCH / FT.AGGREGATE argument trees) intersected with the Flex limitations.
+It emits varied `NOCONTENT`/`RETURN`/`VERBATIM`/`SCORER`/`LANGUAGE`/`INFIELDS`
+searches and `GROUPBY`/`REDUCE`/`APPLY`/`FILTER`/`SORTBY`/`LOAD` aggregations, and
+never emits Flex-rejected args (numeric/geo `FILTER`, `SUMMARIZE`/`HIGHLIGHT`/
+`SLOP`/`INORDER`, `FT.SEARCH SORTBY`, `WITHCURSOR`, TAG prefix/wildcard, …). Use
+it to shake out arg-handling / crash / correctness bugs across the query space.
 
 Other workers: sliding-TTL refresher (`PEXPIRE`), editor (`HSET body`, re-index),
 deleter (`UNLINK`, de-index). Ingest/edit/delete rates come from the config; the
@@ -152,10 +163,12 @@ with the timestamp and each series' value.
     connections = more load, up to `max_workers`) and **rate q/s** (0 = max). Also
     per-query **timeout** and result **limit**. **Apply** pushes changes to the
     running workload instantly — no restart.
-- **Live query feed:** a rolling sample of the **actual randomized queries** being
-  sent (profile · command · matches · latency) — so you can see the varied
-  structure (TAG OR/negation, prefix/fuzzy/wildcard, `GROUPBY` on different fields
-  with different reducers, timeline aggregates).
+  - **🎲 Randomize queries** fires an immediate burst of fully-randomized fuzz
+    queries at the cluster (they appear in the live feed below).
+- **Live query feed:** a **sortable** table (click any column: time · type · query ·
+  matches · latency) showing a rolling sample of the **actual randomized queries**
+  being sent, so you can see the varied structure and, e.g., sort by latency to
+  find the slowest, or by time for execution order.
 - **Live conversations:** browse channels; messages fetched live via `FT.SEARCH`
   + `HGETALL` with TTL countdowns, plus an inline text filter (scoped search).
 - **Index status (FT.INFO):** `num_docs`, `num_records`, `inverted_sz_mb`,

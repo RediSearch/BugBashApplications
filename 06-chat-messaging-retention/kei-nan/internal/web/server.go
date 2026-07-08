@@ -23,6 +23,7 @@ import (
 
 	"chatstress/internal/config"
 	"chatstress/internal/control"
+	"chatstress/internal/fuzz"
 	"chatstress/internal/gendata"
 	"chatstress/internal/metrics"
 	"chatstress/internal/model"
@@ -50,10 +51,11 @@ type Server struct {
 	prevDel int64
 	prevT   time.Time
 
-	qmu  sync.Mutex // guards the (non-thread-safe) query generators below
-	rnd  *rand.Rand
-	pick *model.Picker
-	gen  *gendata.Generator
+	qmu   sync.Mutex // guards the (non-thread-safe) query generators below
+	rnd   *rand.Rand
+	pick  *model.Picker
+	gen   *gendata.Generator
+	tiers []string
 }
 
 // New builds a Server over shared state.
@@ -64,11 +66,16 @@ func New(cfg *config.Config, cli *redisx.Client, met *metrics.Metrics, orc *orac
 		UsersPerTenant:    cfg.UsersPerTenant,
 		ThreadsPerChannel: cfg.ThreadsPerChannel,
 	}
+	tiers := make([]string, len(cfg.Tiers))
+	for i, t := range cfg.Tiers {
+		tiers[i] = t.Name
+	}
 	return &Server{
 		cfg: cfg, cli: cli, met: met, orc: orc, ctrl: ctrl, prevT: time.Now(),
-		rnd:  rand.New(rand.NewSource(cfg.Seed*7919 + 1)),
-		pick: model.NewPicker(space, cfg.Seed, 424242),
-		gen:  gendata.New(cfg.Seed, 999999, cfg.Body.MinWords, cfg.Body.MaxWords, 0),
+		rnd:   rand.New(rand.NewSource(cfg.Seed*7919 + 1)),
+		pick:  model.NewPicker(space, cfg.Seed, 424242),
+		gen:   gendata.New(cfg.Seed, 999999, cfg.Body.MinWords, cfg.Body.MaxWords, 0),
+		tiers: tiers,
 	}
 }
 
@@ -88,6 +95,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/control", s.handleControl)
 	mux.HandleFunc("/api/recent-queries", s.handleRecentQueries)
+	mux.HandleFunc("/api/fuzz", s.handleFuzz)
 	mux.HandleFunc("/api/gen-queries", s.handleGenQueries)
 	mux.HandleFunc("/api/run-queries", s.handleRunQueries)
 	sub, err := fs.Sub(staticFS, "static")
@@ -455,6 +463,52 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRecentQueries(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.met.RecentQueries())
+}
+
+// --- /api/fuzz (fire a burst of fully-randomized disk-legal queries) ---
+
+func (s *Server) handleFuzz(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Count int `json:"count"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.Count <= 0 {
+		req.Count = 12
+	}
+	if req.Count > 100 {
+		req.Count = 100
+	}
+	to := s.ctrl.TimeoutMs()
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	out := make([]runResult, 0, req.Count)
+	for i := 0; i < req.Count; i++ {
+		s.qmu.Lock()
+		sample, ok := s.orc.LiveSample()
+		q := fuzz.Build(s.rnd, s.pick, s.gen, fuzz.Params{Tiers: s.tiers, PageDepth: s.cfg.Query.PageDepth}, sample, ok)
+		s.qmu.Unlock()
+		full := make([]any, 0, len(q.Args)+4)
+		full = append(full, q.Cmd, s.cfg.Index)
+		full = append(full, q.Args...)
+		if to > 0 {
+			full = append(full, "TIMEOUT", to)
+		}
+		start := time.Now()
+		total, _, err := s.cli.RawCount(ctx, full...)
+		ms := float64(time.Since(start).Microseconds()) / 1000.0
+		res := runResult{Query: q.Display, Ms: ms}
+		errStr := ""
+		if err != nil {
+			errStr = err.Error()
+			res.Error = errStr
+		} else {
+			res.Total = total
+		}
+		out = append(out, res)
+		s.met.PushQuery(metrics.QSample{TSec: s.met.Elapsed().Seconds(), Profile: "fuzz", Query: q.Display, Ms: ms, Total: total, Err: errStr})
+	}
+	writeJSON(w, out)
 }
 
 // --- /api/gen-queries (build N editable FT.SEARCH query bodies) ---

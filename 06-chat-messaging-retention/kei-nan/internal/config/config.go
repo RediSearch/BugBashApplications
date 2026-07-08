@@ -55,6 +55,7 @@ var KnownProfiles = map[string]string{
 	"plan_analytics":  "FT.AGGREGATE GROUPBY high-cardinality TAG + REDUCE COUNT (wide groupby)",
 	"deep_pagination": "FT.SEARCH with a large LIMIT offset (OOM / large-offset weak-point)",
 	"text_prefix":     "TEXT prefix query foo* (prefix expansion)",
+	"fuzz":            "fully randomized disk-legal FT.SEARCH/FT.AGGREGATE (broad fuzz testing)",
 }
 
 // Config is the full harness configuration.
@@ -145,6 +146,7 @@ func Default() *Config {
 		{Name: "plan_analytics", Weight: 5},
 		{Name: "deep_pagination", Weight: 5},
 		{Name: "text_prefix", Weight: 5},
+		{Name: "fuzz", Weight: 10},
 	}
 	c.Edit.Rate, c.Delete.Rate, c.Sliding.Rate = 50, 50, 100
 	c.Body.MinWords, c.Body.MaxWords, c.Body.VocabHigh = 6, 24, 0

@@ -13,6 +13,7 @@ import (
 
 	"chatstress/internal/config"
 	"chatstress/internal/control"
+	"chatstress/internal/fuzz"
 	"chatstress/internal/gendata"
 	"chatstress/internal/metrics"
 	"chatstress/internal/model"
@@ -22,19 +23,24 @@ import (
 
 // Runner owns the worker pool and shared state.
 type Runner struct {
-	cfg   *config.Config
-	cli   *redisx.Client
-	orc   *oracle.Oracle
-	met   *metrics.Metrics
-	ctrl  *control.Control
-	space model.Space
-	seq   seqCounter
+	cfg       *config.Config
+	cli       *redisx.Client
+	orc       *oracle.Oracle
+	met       *metrics.Metrics
+	ctrl      *control.Control
+	space     model.Space
+	tierNames []string
+	seq       seqCounter
 }
 
 // New builds a Runner over shared metrics/oracle/client/control.
 func New(cfg *config.Config, cli *redisx.Client, orc *oracle.Oracle, met *metrics.Metrics, ctrl *control.Control) *Runner {
+	tiers := make([]string, len(cfg.Tiers))
+	for i, t := range cfg.Tiers {
+		tiers[i] = t.Name
+	}
 	return &Runner{
-		cfg: cfg, cli: cli, orc: orc, met: met, ctrl: ctrl,
+		cfg: cfg, cli: cli, orc: orc, met: met, ctrl: ctrl, tierNames: tiers,
 		space: model.Space{
 			Tenants:           cfg.Tenants,
 			ChannelsPerTenant: cfg.ChannelsPerTenant,
@@ -399,8 +405,31 @@ func (r *Runner) runProfile(ctx context.Context, prof string, rnd *rand.Rand, pi
 			checkKeys(keys, t0)
 		}
 		return "FT.SEARCH " + q, total, err
+
+	case "fuzz": // fully randomized disk-legal FT.SEARCH / FT.AGGREGATE
+		return r.runFuzz(ctx, rnd, pick, gen, to)
 	}
 	return "", 0, nil
+}
+
+// runFuzz builds and runs one fully-randomized query from the fuzzer.
+func (r *Runner) runFuzz(ctx context.Context, rnd *rand.Rand, pick *model.Picker, gen *gendata.Generator, to int) (string, int64, error) {
+	s, ok := r.orc.LiveSample()
+	q := fuzz.Build(rnd, pick, gen, fuzz.Params{Tiers: r.tierNames, PageDepth: r.cfg.Query.PageDepth}, s, ok)
+	full := make([]any, 0, len(q.Args)+4)
+	full = append(full, q.Cmd, r.cfg.Index)
+	full = append(full, q.Args...)
+	if to > 0 {
+		full = append(full, "TIMEOUT", to)
+	}
+	t0 := time.Now().UnixMilli()
+	total, keys, err := r.cli.RawCount(ctx, full...)
+	if err == nil && q.NoContent {
+		for _, k := range keys {
+			r.orc.Check(k, t0)
+		}
+	}
+	return q.Display, total, err
 }
 
 // channelFor returns a channel that likely has live data (from the oracle),

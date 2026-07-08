@@ -40,11 +40,11 @@
           <label>timeout ms<input id="c-timeout" type="number" min="0" step="50" /><small>0 = default</small></label>
           <label>limit<input id="c-limit" type="number" min="1" step="10" /><small>rows/query</small></label>
           <div class="load-btns">
-            <button id="c-randomize" title="randomize which types are enabled and their weights">🎲 Shuffle mix</button>
+            <button id="c-fuzz" title="fire a burst of fully-randomized, disk-legal queries at the cluster now">🎲 Randomize queries</button>
             <button id="c-apply" class="primary">Apply</button>
           </div>
         </div>
-        <div class="mix-head">Query types <span class="hint">toggle on/off · weight = probability · each type emits randomized queries · counts update live</span></div>
+        <div class="mix-head">Query types <span class="hint">toggle on/off · weight = probability · the <b>fuzz</b> type emits fully-randomized FT.SEARCH/FT.AGGREGATE · counts update live</span></div>
         <div class="mix" id="mix"></div>
       </div>
     </section>
@@ -95,7 +95,18 @@
         <span class="hint">a live sample of the actual randomized queries hitting the cluster (profile · command · matches · latency)</span>
         <span class="chevron">▾</span>
       </div>
-      <div class="panel-body"><div class="feed" id="feed"><div class="muted">waiting for queries…</div></div></div>
+      <div class="panel-body">
+        <table class="feedtbl">
+          <thead><tr>
+            <th data-k="t" class="sortable">t (s)</th>
+            <th data-k="profile" class="sortable">type</th>
+            <th data-k="query" class="sortable">query</th>
+            <th data-k="total" class="sortable">matches</th>
+            <th data-k="ms" class="sortable">ms</th>
+          </tr></thead>
+          <tbody id="feedbody"><tr><td colspan="5" class="muted">waiting for queries…</td></tr></tbody>
+        </table>
+      </div>
     </section>
   </main>
 

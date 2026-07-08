@@ -159,6 +159,27 @@ func (c *Client) Aggregate(ctx context.Context, timeoutMs int, args ...any) (row
 	return len(res) - 1, nil
 }
 
+// RawCount executes an arbitrary command (args must start with the command name
+// and index, e.g. "FT.SEARCH"/"FT.AGGREGATE") and returns the leading count plus
+// any string elements of the reply (the matching keys, for NOCONTENT searches).
+// Used by the query fuzzer.
+func (c *Client) RawCount(ctx context.Context, args ...any) (total int64, keys []string, err error) {
+	res, err := c.rdb.Do(ctx, args...).Slice()
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(res) == 0 {
+		return 0, nil, nil
+	}
+	total = toInt(res[0])
+	for _, v := range res[1:] {
+		if s, ok := v.(string); ok {
+			keys = append(keys, s)
+		}
+	}
+	return total, keys, nil
+}
+
 // Doc returns a message's fields and its remaining whole-key TTL.
 func (c *Client) Doc(ctx context.Context, key string) (fields map[string]string, ttl time.Duration, err error) {
 	pipe := c.rdb.Pipeline()
