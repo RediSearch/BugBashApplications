@@ -24,16 +24,18 @@ query:
   limit: 20
   page_depth: 2000   # max offset for the deep_pagination profile
   slow_ms: 500       # a query at/above this latency counts as "slow" (timeout-risk)
-  # High-level query mix (weights -> probability). Tunable live from the UI.
+  # Query mix (weights -> probability), tunable live in the UI. "fuzz" emits
+  # fully-randomized disk-legal queries; the rest target specific weak-points.
+  # Set fuzz to 100 (others 0) for pure random queries.
   profiles:
-    - { name: channel_search,  weight: 45 }   # scoped text in a channel (recall-checked)
-    - { name: thread_search,   weight: 15 }   # high-cardinality thread posting list
+    - { name: channel_search,  weight: 30 }   # scoped text in a channel
+    - { name: thread_search,   weight: 10 }   # high-cardinality thread posting list
     - { name: tag_filter,      weight: 10 }   # retention-tier / tenant TAG filter
-    - { name: recent_timeline, weight: 15 }   # FT.AGGREGATE LOAD @ts + to_number + SORTBY
+    - { name: recent_timeline, weight: 10 }   # FT.AGGREGATE LOAD @ts + to_number + SORTBY
     - { name: plan_analytics,  weight: 5 }    # FT.AGGREGATE wide GROUPBY (OOM weak-point)
     - { name: deep_pagination, weight: 5 }    # large LIMIT offset (OOM / large-offset)
-    - { name: text_prefix,     weight: 5 }    # TEXT prefix expansion foo*
-    - { name: fuzz,            weight: 10 }   # fully-randomized disk-legal queries (broad fuzz)
+    - { name: text_prefix,     weight: 5 }    # TEXT prefix/fuzzy/wildcard expansion
+    - { name: fuzz,            weight: 25 }   # fully-randomized (the "odd one out")
 
 edit:   { rate: 50 }   # HSET body edits/sec (re-index)
 delete: { rate: 50 }   # UNLINK deletes/sec (de-index)

@@ -26,15 +26,17 @@ query:
   limit: 50
   page_depth: 100000 # deep offsets to probe the large-offset / OOM guardrail
   slow_ms: 500       # matches the default server query timeout
+  # "fuzz" emits fully-randomized disk-legal queries; the rest target weak-points.
+  # Tunable live in the UI; set fuzz to 100 (others 0) for pure random queries.
   profiles:
-    - { name: channel_search,  weight: 35 }
-    - { name: thread_search,   weight: 15 }
+    - { name: channel_search,  weight: 25 }
+    - { name: thread_search,   weight: 10 }
     - { name: tag_filter,      weight: 10 }
-    - { name: recent_timeline, weight: 15 }
-    - { name: plan_analytics,  weight: 10 }  # wide GROUPBY over ~1M channels — stresses max-aggregate-groups
+    - { name: recent_timeline, weight: 10 }
+    - { name: plan_analytics,  weight: 10 }  # wide GROUPBY over ~1M channels
     - { name: deep_pagination, weight: 10 }
     - { name: text_prefix,     weight: 5 }
-    - { name: fuzz,            weight: 15 }  # broad fuzz across the supported query surface
+    - { name: fuzz,            weight: 20 }
 
 edit:    { rate: 500 }
 delete:  { rate: 500 }

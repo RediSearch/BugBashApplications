@@ -203,7 +203,7 @@ function mixRow(p) {
   const wt = on ? p.weight : 10;
   return `<div class="mixrow ${on ? "" : "off"}" data-prof="${p.name}">
     <input type="checkbox" class="mx-on" ${on ? "checked" : ""} />
-    <div class="nm">${p.name}<small>${escapeHtml(p.desc)} · <span class="rc">${fmtNum(p.count)}</span> run</small></div>
+    <div class="nm"><span class="gp ${p.name}">${p.name}</span><small>${escapeHtml(p.desc)} · <span class="rc">${fmtNum(p.count)}</span> run</small></div>
     <input type="number" class="mx-wt" min="1" value="${wt}" ${on ? "" : "disabled"} />
   </div>`;
 }
@@ -229,6 +229,7 @@ async function loadControl() {
       const row = cb.closest(".mixrow"); const wt = row.querySelector(".mx-wt");
       row.classList.toggle("off", !cb.checked); wt.disabled = !cb.checked;
     }));
+    renderPool(c.pool);
   } catch (e) {}
 }
 async function refreshCounts() {
@@ -258,12 +259,27 @@ async function applyControl() {
   };
   try { await postJSON("/api/control", body); loadControl(); } catch (e) {}
 }
-async function randomizeNow() {
-  const btn = document.getElementById("c-randomize");
-  btn.disabled = true; const prev = btn.textContent; btn.textContent = "🎲 re-rolling…";
-  try { await postJSON("/api/randomize", {}); await refreshFeed(); }
-  catch (e) {}
+function renderPool(items) {
+  const el = document.getElementById("genset");
+  if (!items || !items.length) { el.innerHTML = '<div class="muted">no queries…</div>'; return; }
+  document.getElementById("genset-hint").textContent =
+    items.length + " random queries the threads are running — Refresh (or auto) re-rolls them; note the LOAD / APPLY / GROUPBY variety";
+  el.innerHTML = items.map((q) =>
+    `<div class="gq"><span class="gp ${q.profile}">${q.profile}</span><span class="gcmd">${escapeHtml(q.query)}</span></div>`).join("");
+}
+async function refreshQueries() {
+  const btn = document.getElementById("c-refresh");
+  btn.disabled = true; const prev = btn.textContent; btn.textContent = "🔄 …";
+  try { renderPool(await postJSON("/api/randomize", {})); } catch (e) {}
   finally { btn.disabled = false; btn.textContent = prev; }
+}
+let autoTimer = null;
+function setAuto(on) {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  if (on) {
+    const secs = Math.max(2, parseInt(document.getElementById("c-auto-int").value, 10) || 10);
+    autoTimer = setInterval(refreshQueries, secs * 1000);
+  }
 }
 async function pauseToggle() {
   paused = !paused; applyPausedUI();
@@ -362,8 +378,10 @@ async function tickStats() { try { renderStats(await getJSON("/api/stats")); } c
 
 loadConfig(); loadControl(); tickStats(); refreshChannels(); refreshMessages(); refreshFeed();
 document.getElementById("c-apply").addEventListener("click", applyControl);
-document.getElementById("c-randomize").addEventListener("click", randomizeNow);
+document.getElementById("c-refresh").addEventListener("click", refreshQueries);
 document.getElementById("c-pause").addEventListener("click", pauseToggle);
+document.getElementById("c-auto").addEventListener("change", (e) => setAuto(e.target.checked));
+document.getElementById("c-auto-int").addEventListener("change", () => { if (document.getElementById("c-auto").checked) setAuto(true); });
 document.getElementById("s-run").addEventListener("click", refreshMessages);
 document.getElementById("s-clear").addEventListener("click", () => { document.getElementById("s-text").value = ""; refreshMessages(); });
 document.getElementById("s-text").addEventListener("keydown", (e) => { if (e.key === "Enter") refreshMessages(); });

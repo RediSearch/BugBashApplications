@@ -83,6 +83,15 @@ func (c *Control) PoolSize() int {
 	return len(c.pool)
 }
 
+// PoolItems returns a copy of the current pool (for the UI preview).
+func (c *Control) PoolItems() []QueryItem {
+	c.poolMu.RLock()
+	defer c.poolMu.RUnlock()
+	out := make([]QueryItem, len(c.pool))
+	copy(out, c.pool)
+	return out
+}
+
 // PickPooled returns a query from the pool chosen by the given random int.
 // ok is false when the pool is empty.
 func (c *Control) PickPooled(rn int) (QueryItem, bool) {

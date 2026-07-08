@@ -139,15 +139,17 @@ func Default() *Config {
 	c.Ingest.Workers, c.Ingest.Rate, c.Ingest.Pipeline = 4, 2000, 200
 	c.Query.Workers, c.Query.MaxWorkers, c.Query.Rate, c.Query.Limit = 4, 64, 200, 20
 	c.Query.PageDepth, c.Query.SlowMs, c.Query.PoolSize = 2000, 500, 64
+	// A mix of targeted types plus a healthy share of "fuzz" (fully-randomized
+	// disk-legal queries). Tune the weights (or go fuzz-only) live in the UI.
 	c.Query.Profiles = []QueryProfile{
-		{Name: "channel_search", Weight: 45},
-		{Name: "thread_search", Weight: 15},
+		{Name: "channel_search", Weight: 30},
+		{Name: "thread_search", Weight: 10},
 		{Name: "tag_filter", Weight: 10},
-		{Name: "recent_timeline", Weight: 15},
+		{Name: "recent_timeline", Weight: 10},
 		{Name: "plan_analytics", Weight: 5},
 		{Name: "deep_pagination", Weight: 5},
 		{Name: "text_prefix", Weight: 5},
-		{Name: "fuzz", Weight: 10},
+		{Name: "fuzz", Weight: 25},
 	}
 	c.Edit.Rate, c.Delete.Rate, c.Sliding.Rate = 50, 50, 100
 	c.Body.MinWords, c.Body.MaxWords, c.Body.VocabHigh = 6, 24, 0

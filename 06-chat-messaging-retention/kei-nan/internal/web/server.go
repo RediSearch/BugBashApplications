@@ -384,15 +384,29 @@ type profileView struct {
 }
 
 type controlResp struct {
-	Rate        int           `json:"rate"`
-	TimeoutMs   int           `json:"timeout_ms"`
-	Limit       int           `json:"limit"`
-	Concurrency int           `json:"concurrency"`
-	MaxWorkers  int           `json:"max_workers"`
-	PageDepth   int           `json:"page_depth"`
-	Paused      bool          `json:"paused"`
-	PoolSize    int           `json:"pool_size"`
-	Profiles    []profileView `json:"profiles"`
+	Rate        int            `json:"rate"`
+	TimeoutMs   int            `json:"timeout_ms"`
+	Limit       int            `json:"limit"`
+	Concurrency int            `json:"concurrency"`
+	MaxWorkers  int            `json:"max_workers"`
+	PageDepth   int            `json:"page_depth"`
+	Paused      bool           `json:"paused"`
+	PoolSize    int            `json:"pool_size"`
+	Profiles    []profileView  `json:"profiles"`
+	Pool        []poolItemView `json:"pool"` // the current query set the threads run
+}
+
+type poolItemView struct {
+	Profile string `json:"profile"`
+	Query   string `json:"query"`
+}
+
+func poolView(items []control.QueryItem) []poolItemView {
+	out := make([]poolItemView, 0, len(items))
+	for _, it := range items {
+		out = append(out, poolItemView{Profile: it.Profile, Query: it.Display})
+	}
+	return out
 }
 
 type controlReq struct {
@@ -466,7 +480,7 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 		Rate: s.ctrl.QueryRate(), TimeoutMs: s.ctrl.TimeoutMs(), Limit: s.ctrl.Limit(),
 		Concurrency: s.ctrl.Concurrency(), MaxWorkers: s.ctrl.MaxWorkers(),
 		PageDepth: s.cfg.Query.PageDepth, Paused: s.ctrl.Paused(), PoolSize: s.ctrl.PoolSize(),
-		Profiles: out,
+		Profiles: out, Pool: poolView(s.ctrl.PoolItems()),
 	})
 }
 
@@ -492,7 +506,7 @@ func (s *Server) regenPool() {
 
 func (s *Server) handleRandomize(w http.ResponseWriter, r *http.Request) {
 	s.regenPool()
-	writeJSON(w, map[string]any{"pool_size": s.ctrl.PoolSize()})
+	writeJSON(w, poolView(s.ctrl.PoolItems()))
 }
 
 // --- /api/gen-queries (build N editable FT.SEARCH query bodies) ---

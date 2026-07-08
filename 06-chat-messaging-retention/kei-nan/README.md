@@ -155,21 +155,22 @@ with the timestamp and each series' value.
 - **High-level KPIs** (hover any tile for an explanation): messages retained,
   ingesting/s, expiring/s, footprint (+ plateau badge), stale results
   (correctness), query p99, slow queries, recall.
-- **Query load** — the single place to drive query traffic:
-  - *Query types:* toggle each profile on/off and set its relative weight, or hit
-    **🎲 Randomize types** to randomize the mix. This is the "control or
-    randomization of the type of queries" knob.
+- **Query load** — drives the query traffic:
+  - *Query types* (colour-coded so `fuzz` — the fully-random one — stands out):
+    toggle each on/off and set its relative weight. `fuzz` emits fully-randomized
+    disk-legal queries; the rest target specific weak-points. Default is a mix with
+    `fuzz` ~25%; set `fuzz` to 100 (others 0) for pure random queries.
   - *Load:* **threads** (live query concurrency — more threads = more concurrent
-    connections = more load, up to `max_workers`) and **rate q/s** (0 = max). Also
-    per-query **timeout** and result **limit**. **Apply** pushes changes to the
-    running workload instantly — no restart.
-  - The background threads continuously run a **pool** of concrete random queries
-    (composed from the enabled types). **🎲 Randomize queries** re-rolls that pool,
-    so the threads immediately start sending a fresh random set; changing the
-    types/limit + **Apply** also rebuilds it.
+    connections = more load, up to `max_workers`) and **rate q/s** (0 = max), plus
+    per-query **timeout** and result **limit**. **Apply** pushes changes instantly.
+  - The threads continuously run a **set** of concrete random queries (composed
+    from the enabled types). You control *when* it re-randomizes: **🔄 Refresh
+    queries** (now) or the **auto** toggle (every N seconds).
   - **⏸ Pause / ▶ Resume** freezes/unfreezes the whole workload (ingest, mutations
     and queries) so you can inspect a steady state — expiry still proceeds, so you
     can watch the index drain.
+- **Generated query set** — shows the exact random queries the threads are running
+  right now, so you can see the `LOAD` / `APPLY` / `GROUPBY` / wildcard variety.
 - **Live query feed:** a **sortable** table (click any column: time · type · query ·
   matches · latency) showing a rolling sample of the **actual randomized queries**
   being sent, so you can see the varied structure and, e.g., sort by latency to
