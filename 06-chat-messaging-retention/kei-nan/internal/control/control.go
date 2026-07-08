@@ -28,6 +28,7 @@ type Control struct {
 	limit       atomic.Int64 // FT.SEARCH LIMIT count
 	concurrency atomic.Int64 // number of query worker threads/connections
 	paused      atomic.Bool  // when true, all workers idle
+	noExpire    atomic.Bool  // when true, newly-ingested docs get NO whole-key TTL
 	maxWorkers  int          // hard cap on concurrency (immutable; sizes the conn pool)
 
 	mu          sync.RWMutex
@@ -68,6 +69,11 @@ func (c *Control) MaxWorkers() int { return c.maxWorkers }
 // Paused / SetPaused — when paused, all workers idle (no ingest/query/mutation).
 func (c *Control) Paused() bool     { return c.paused.Load() }
 func (c *Control) SetPaused(v bool) { c.paused.Store(v) }
+
+// NoExpire / SetNoExpire — when on, newly-ingested docs are written WITHOUT a
+// whole-key TTL (persistent). Lets you mix expiring and non-expiring documents.
+func (c *Control) NoExpire() bool     { return c.noExpire.Load() }
+func (c *Control) SetNoExpire(v bool) { c.noExpire.Store(v) }
 
 // SetPool replaces the query pool the workers run.
 func (c *Control) SetPool(items []QueryItem) {
@@ -156,25 +162,4 @@ func (c *Control) Profiles() []config.QueryProfile {
 	out := make([]config.QueryProfile, len(c.profiles))
 	copy(out, c.profiles)
 	return out
-}
-
-// PickProfile chooses a profile by weight given a non-negative random int.
-// Returns "" if no profiles are configured.
-func (c *Control) PickProfile(rn int) string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.totalWeight <= 0 {
-		return ""
-	}
-	if rn < 0 {
-		rn = -rn
-	}
-	x := rn % c.totalWeight
-	for _, p := range c.profiles {
-		if x < p.Weight {
-			return p.Name
-		}
-		x -= p.Weight
-	}
-	return c.profiles[len(c.profiles)-1].Name
 }

@@ -8,6 +8,7 @@ package redisx
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -25,29 +26,43 @@ type Client struct {
 	index string
 }
 
+// Options configures the connection. Username/Password/TLS support cloud
+// endpoints (e.g. Redis Cloud / Enterprise Flex over TLS with ACL auth).
+type Options struct {
+	Addr          string
+	Username      string
+	Password      string
+	TLS           bool
+	TLSSkipVerify bool
+	Index         string
+	PoolSize      int
+}
+
 // New dials the server. RESP2 is forced so FT.INFO / FT.SEARCH replies are plain
 // arrays that are simple to parse.
-func New(addr, password, index string, poolSize int) (*Client, error) {
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     addr,
-		Password: password,
+func New(o Options) (*Client, error) {
+	ropts := &redis.Options{
+		Addr:     o.Addr,
+		Username: o.Username,
+		Password: o.Password,
 		Protocol: 2,
-		PoolSize: poolSize,
-	})
-	c := &Client{rdb: rdb, index: index}
+		PoolSize: o.PoolSize,
+	}
+	if o.TLS {
+		ropts.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: o.TLSSkipVerify}
+	}
+	rdb := redis.NewClient(ropts)
+	c := &Client{rdb: rdb, index: o.Index}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := rdb.Ping(ctx).Err(); err != nil {
-		return nil, fmt.Errorf("ping %s: %w", addr, err)
+		return nil, fmt.Errorf("ping %s: %w", o.Addr, err)
 	}
 	return c, nil
 }
 
 // Close releases the connection pool.
 func (c *Client) Close() error { return c.rdb.Close() }
-
-// Raw exposes the underlying client (used sparingly, e.g. FLUSHALL in tests).
-func (c *Client) Raw() *redis.Client { return c.rdb }
 
 // CreateIndex creates the disk-appropriate HASH index. SKIPINITIALSCAN is
 // required for disk indexes, so this MUST be called before loading data.
@@ -80,12 +95,15 @@ func (c *Client) DropIndex(ctx context.Context) error {
 	return err
 }
 
-// IngestBatch pipelines HSET + whole-key PEXPIRE for a batch of messages.
+// IngestBatch pipelines HSET (+ whole-key PEXPIRE) for a batch of messages. A
+// message with TTL <= 0 is written persistent (no PEXPIRE).
 func (c *Client) IngestBatch(ctx context.Context, msgs []*model.Message) error {
 	pipe := c.rdb.Pipeline()
 	for _, m := range msgs {
 		pipe.HSet(ctx, m.Key, m.HashArgs()...)
-		pipe.PExpire(ctx, m.Key, m.TTL)
+		if m.TTL > 0 {
+			pipe.PExpire(ctx, m.Key, m.TTL)
+		}
 	}
 	_, err := pipe.Exec(ctx)
 	return err
@@ -136,27 +154,6 @@ func (c *Client) SearchLimit(ctx context.Context, query string, offset, n, timeo
 		}
 	}
 	return total, keys, nil
-}
-
-// Aggregate runs FT.AGGREGATE <idx> <args...> and returns the number of result
-// rows (best-effort). timeoutMs > 0 appends a per-query TIMEOUT.
-func (c *Client) Aggregate(ctx context.Context, timeoutMs int, args ...any) (rows int, err error) {
-	full := make([]any, 0, len(args)+4)
-	full = append(full, "FT.AGGREGATE", c.index)
-	full = append(full, args...)
-	if timeoutMs > 0 {
-		full = append(full, "TIMEOUT", timeoutMs)
-	}
-	res, err := c.rdb.Do(ctx, full...).Slice()
-	if err != nil {
-		return 0, err
-	}
-	// Reply is [count, row1, row2, ...]; treat everything after the leading
-	// count as a result row.
-	if len(res) <= 1 {
-		return 0, nil
-	}
-	return len(res) - 1, nil
 }
 
 // RawCount executes an arbitrary command (args must start with the command name
@@ -289,11 +286,6 @@ func (c *Client) DiskFlush(ctx context.Context) error {
 // ForceGC runs a synchronous GC/compaction cycle. Best-effort.
 func (c *Client) ForceGC(ctx context.Context) error {
 	return c.rdb.Do(ctx, "_FT.DEBUG", "GC_FORCEINVOKE", c.index).Err()
-}
-
-// StopGCSchedule disables automatic GC (to isolate footprint measurements).
-func (c *Client) StopGCSchedule(ctx context.Context) error {
-	return c.rdb.Do(ctx, "_FT.DEBUG", "GC_STOP_SCHEDULE", c.index).Err()
 }
 
 // DebugReload triggers an in-process RDB save+load round-trip.

@@ -42,15 +42,6 @@ type Server struct {
 	orc  *oracle.Oracle
 	ctrl *control.Control
 
-	rmu     sync.Mutex
-	rIngest float64
-	rQuery  float64
-	rDelete float64
-	prevIng int64
-	prevQ   int64
-	prevDel int64
-	prevT   time.Time
-
 	qmu   sync.Mutex // guards the (non-thread-safe) query generators below
 	rnd   *rand.Rand
 	pick  *model.Picker
@@ -71,7 +62,7 @@ func New(cfg *config.Config, cli *redisx.Client, met *metrics.Metrics, orc *orac
 		tiers[i] = t.Name
 	}
 	return &Server{
-		cfg: cfg, cli: cli, met: met, orc: orc, ctrl: ctrl, prevT: time.Now(),
+		cfg: cfg, cli: cli, met: met, orc: orc, ctrl: ctrl,
 		rnd:   rand.New(rand.NewSource(cfg.Seed*7919 + 1)),
 		pick:  model.NewPicker(space, cfg.Seed, 424242),
 		gen:   gendata.New(cfg.Seed, 999999, cfg.Body.MinWords, cfg.Body.MaxWords, 0),
@@ -105,7 +96,6 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.Handle("/", http.FileServer(http.FS(sub)))
 
 	srv := &http.Server{Addr: s.cfg.Web.Addr, Handler: mux}
-	go s.rateLoop(ctx)
 	go func() {
 		<-ctx.Done()
 		sh, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -116,32 +106,6 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	return nil
-}
-
-func (s *Server) rateLoop(ctx context.Context) {
-	t := time.NewTicker(time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			now := time.Now()
-			dt := now.Sub(s.prevT).Seconds()
-			if dt <= 0 {
-				dt = 1
-			}
-			ing := s.met.C.Ingested.Load()
-			q := s.met.C.Queries.Load()
-			del := s.met.C.Deleted.Load()
-			s.rmu.Lock()
-			s.rIngest = float64(ing-s.prevIng) / dt
-			s.rQuery = float64(q-s.prevQ) / dt
-			s.rDelete = float64(del-s.prevDel) / dt
-			s.rmu.Unlock()
-			s.prevIng, s.prevQ, s.prevDel, s.prevT = ing, q, del, now
-		}
-	}
 }
 
 // --- /api/stats ---
@@ -195,23 +159,10 @@ type errsResp struct {
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	series := s.met.Series()
 	status := s.met.Status()
-	s.rmu.Lock()
-	ri, rq, rd := s.rIngest, s.rQuery, s.rDelete
-	s.rmu.Unlock()
-
-	// Estimate expiry rate: at steady state, expire ≈ ingest − net-doc-growth − deletes.
-	docGrowth := 0.0
-	if n := len(series); n >= 2 {
-		a, b := series[n-2], series[n-1]
-		if dt := b.TSec - a.TSec; dt > 0 {
-			docGrowth = float64(b.NumDocs-a.NumDocs) / dt
-		}
+	var latest metrics.Sample
+	if n := len(series); n > 0 {
+		latest = series[n-1] // rates + windowed latency are computed by the sampler
 	}
-	expire := ri - docGrowth - rd
-	if expire < 0 {
-		expire = 0
-	}
-
 	v := s.met.Plateau()
 	footBytes := status.UsedMem
 	if status.DiskMode {
@@ -226,10 +177,10 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	resp := statsResp{
 		ElapsedSec: s.met.Elapsed().Seconds(),
 		DiskMode:   status.DiskMode,
-		Rates:      ratesResp{Ingest: ri, Query: rq, Expire: expire, Delete: rd},
+		Rates:      ratesResp{Ingest: latest.IngestRate, Query: latest.QueryRate, Expire: latest.ExpireRate, Delete: latest.DeleteRate},
 		Latency: latencyResp{
-			P50:  s.met.Lat.Percentile(0.50),
-			P99:  s.met.Lat.Percentile(0.99),
+			P50:  latest.P50,
+			P99:  latest.P99,
 			Slow: s.met.C.SlowQueries.Load(),
 		},
 		Correctness: correctnessResp{
@@ -391,6 +342,7 @@ type controlResp struct {
 	MaxWorkers  int            `json:"max_workers"`
 	PageDepth   int            `json:"page_depth"`
 	Paused      bool           `json:"paused"`
+	NoExpire    bool           `json:"no_expire"`
 	PoolSize    int            `json:"pool_size"`
 	Profiles    []profileView  `json:"profiles"`
 	Pool        []poolItemView `json:"pool"` // the current query set the threads run
@@ -415,6 +367,7 @@ type controlReq struct {
 	Limit       *int  `json:"limit"`
 	Concurrency *int  `json:"concurrency"`
 	Paused      *bool `json:"paused"`
+	NoExpire    *bool `json:"no_expire"`
 	Profiles    []struct {
 		Name   string `json:"name"`
 		Weight int    `json:"weight"`
@@ -443,6 +396,9 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 		if req.Paused != nil {
 			s.ctrl.SetPaused(*req.Paused)
 		}
+		if req.NoExpire != nil {
+			s.ctrl.SetNoExpire(*req.NoExpire)
+		}
 		if len(req.Profiles) > 0 {
 			ps := make([]config.QueryProfile, 0, len(req.Profiles))
 			for _, p := range req.Profiles {
@@ -450,8 +406,8 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 			}
 			s.ctrl.SetProfiles(ps)
 		}
-		// The pool bakes in the mix + limit, so regenerate it when either changes.
-		if len(req.Profiles) > 0 || req.Limit != nil {
+		// The pool bakes in the mix + limit + timeout, so regenerate on any change.
+		if len(req.Profiles) > 0 || req.Limit != nil || req.TimeoutMs != nil {
 			s.regenPool()
 		}
 	}
@@ -479,8 +435,8 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, controlResp{
 		Rate: s.ctrl.QueryRate(), TimeoutMs: s.ctrl.TimeoutMs(), Limit: s.ctrl.Limit(),
 		Concurrency: s.ctrl.Concurrency(), MaxWorkers: s.ctrl.MaxWorkers(),
-		PageDepth: s.cfg.Query.PageDepth, Paused: s.ctrl.Paused(), PoolSize: s.ctrl.PoolSize(),
-		Profiles: out, Pool: poolView(s.ctrl.PoolItems()),
+		PageDepth: s.cfg.Query.PageDepth, Paused: s.ctrl.Paused(), NoExpire: s.ctrl.NoExpire(),
+		PoolSize: s.ctrl.PoolSize(), Profiles: out, Pool: poolView(s.ctrl.PoolItems()),
 	})
 }
 
@@ -497,7 +453,7 @@ func (s *Server) regenPool() {
 	defer s.qmu.Unlock()
 	d := querygen.Deps{
 		Pick: s.pick, Gen: s.gen, Tiers: s.tiers,
-		PageDepth: s.cfg.Query.PageDepth, Limit: s.ctrl.Limit(), Live: s.orc.LiveSample,
+		PageDepth: s.cfg.Query.PageDepth, Limit: s.ctrl.Limit(), TimeoutMs: s.ctrl.TimeoutMs(), Live: s.orc.LiveSample,
 	}
 	s.ctrl.SetPool(querygen.Pool(s.rnd, s.cfg.Query.PoolSize, s.ctrl.Profiles(), d))
 }

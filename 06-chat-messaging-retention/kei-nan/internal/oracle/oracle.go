@@ -43,7 +43,8 @@ type Oracle struct {
 	shards          []shard
 	cap             int
 	sampleThreshold uint64 // key-hash % 1e6 < threshold => tracked
-	graceMs         int64
+	graceMs         int64  // grace before a deleted doc counts as stale (async de-index)
+	skewMs          int64  // clock-skew tolerance for the expiry check (client vs server clock)
 	retainMs        int64
 	rr              atomic.Uint64 // round-robin shard selector for sampling
 
@@ -59,8 +60,9 @@ type Oracle struct {
 }
 
 // New builds an Oracle with the given shard count, tracking cap, sample rate
-// (0..1) and post-expiry grace (ms) before a document is probed as gone.
-func New(shards, cap int, sampleRate float64, graceMs int) *Oracle {
+// (0..1), post-expiry/deletion grace (ms), and clock-skew tolerance (ms) for the
+// expiry check.
+func New(shards, cap int, sampleRate float64, graceMs, skewMs int) *Oracle {
 	if shards < 1 {
 		shards = 1
 	}
@@ -69,6 +71,7 @@ func New(shards, cap int, sampleRate float64, graceMs int) *Oracle {
 		cap:             cap,
 		sampleThreshold: uint64(sampleRate * 1_000_000),
 		graceMs:         int64(graceMs),
+		skewMs:          int64(skewMs),
 		retainMs:        30_000,
 	}
 	for i := range o.shards {
@@ -161,11 +164,13 @@ func (o *Oracle) Check(key string, t0Ms int64) Violation {
 	if e == nil {
 		return None // untracked (sampled out) — not classifiable
 	}
-	// Expiry has a synchronous read-time filter (the server compares the stored
-	// expiration against the query clock), so a strict check is correct: because
-	// the oracle's expireAt is an upper bound of the server's, expireAt <= t0
-	// guarantees the server also sees it expired at query time.
-	if exp <= t0Ms {
+	// Expiry has a synchronous read-time filter (the server compares its stored
+	// expiration against the query clock). The oracle's expireAt is derived from
+	// the CLIENT clock, so against a remote server we require the doc to be
+	// expired by more than skewMs before t0 — this tolerates NTP-level client/
+	// server clock skew and avoids false stale-hits at the expiry boundary, while
+	// still catching the real (multi-second) GC/reap-lag stale hits.
+	if exp <= t0Ms-o.skewMs {
 		o.staleExpired.Add(1)
 		return Expired
 	}

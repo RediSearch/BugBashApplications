@@ -21,6 +21,8 @@
       <span class="badge" id="badge-plateau">footprint …</span>
       <span class="badge warn" id="badge-paused" style="display:none">⏸ PAUSED</span>
       <span class="badge ghost" id="badge-elapsed">t=0s</span>
+      <button id="c-noexpire" class="topbtn" title="toggle whether NEW documents are written with a TTL; off = persistent docs">🕒 TTL: on</button>
+      <button id="c-pause" class="topbtn" title="pause/resume the whole workload (ingest, mutations and queries)">⏸ Pause</button>
     </div>
   </header>
 
@@ -40,17 +42,14 @@
           <label>rate q/s<input id="c-rate" type="number" min="0" step="50" /><small>0 = max</small></label>
           <label>timeout ms<input id="c-timeout" type="number" min="0" step="50" /><small>0 = default</small></label>
           <label>limit<input id="c-limit" type="number" min="1" step="10" /><small>rows/query</small></label>
-          <div class="load-btns">
-            <button id="c-pause" title="pause/resume the whole workload (ingest, mutations and queries)">⏸ Pause</button>
-            <label class="autolbl" title="re-roll the random query set automatically on an interval">
-              <input type="checkbox" id="c-auto" /> auto <input type="number" id="c-auto-int" value="10" min="2" step="1" /> s
-            </label>
-            <button id="c-refresh" title="re-roll the random set of queries the threads run, now">🔄 Refresh queries</button>
-            <button id="c-apply" class="primary" title="apply threads/rate/timeout/limit and the enabled types">Apply</button>
-          </div>
         </div>
+        <div class="hint" style="margin-bottom:6px">threads drive load only up to <b>rate</b> — set rate to <b>0</b> for threads to push max throughput. limit/timeout are baked into the query set on Apply (visible below).</div>
         <div class="mix-head">Query types <span class="hint">toggle on/off · weight = probability · the <b>fuzz</b> type emits fully-randomized FT.SEARCH/FT.AGGREGATE · counts update live</span></div>
         <div class="mix" id="mix"></div>
+        <div class="apply-row">
+          <span class="hint">applies the settings + enabled types above and rebuilds the query set</span>
+          <button id="c-apply" class="primary" title="apply threads/rate/timeout/limit and the enabled query types">Apply settings &amp; types</button>
+        </div>
       </div>
     </section>
 
@@ -64,7 +63,13 @@
     <section class="panel span3" id="p-genset">
       <div class="panel-head" data-collapse>
         <h2>Generated query set</h2>
-        <span class="hint" id="genset-hint">the exact random queries the threads are running — Refresh (or auto) re-rolls them; note the LOAD / APPLY / GROUPBY variety</span>
+        <span class="hint" id="genset-hint">the exact random queries the threads are running — note the LOAD / APPLY / GROUPBY variety</span>
+        <div class="setctl" id="setctl">
+          <label class="autolbl" title="re-roll the query set automatically on an interval">
+            <input type="checkbox" id="c-auto" /> auto <input type="number" id="c-auto-int" value="10" min="2" step="1" /> s
+          </label>
+          <button id="c-refresh" title="re-roll the random query set now">🔄 Refresh</button>
+        </div>
         <span class="chevron">▾</span>
       </div>
       <div class="panel-body"><div class="genset" id="genset"><div class="muted">…</div></div></div>

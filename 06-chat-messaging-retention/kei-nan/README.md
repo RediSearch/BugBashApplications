@@ -91,7 +91,25 @@ Open the dashboard at **http://localhost:8080**. It stays up after the run
 completes so you can inspect the final state (Ctrl-C to exit). Confirm the disk
 path is live with `redis-cli INFO search | grep search_disk_usage`.
 
-Flags: `-addr`, `-config`, `-duration`, `-web-addr`, `-flush`, `-no-web`, `-seed`.
+Flags: `-addr`, `-config`, `-duration`, `-web-addr`, `-flush`, `-no-web`, `-seed`,
+`-password`, `-username`, `-tls`.
+
+### Connecting to a cloud endpoint
+
+The connection is a **launch-time** parameter (the harness connects once, creates
+the index, then runs) — there's no connection box in the dashboard, which only
+controls the workload. Point it at a cloud Flex/BigRedis endpoint with flags or
+config:
+
+```bash
+./bin/chatstress run -config config/bugbash.yaml \
+  -addr my-endpoint.cloud.redislabs.com:6379 -tls -username default -password "$REDIS_PASSWORD"
+```
+
+Config equivalents: `addr`, `tls: true`, `tls_skip_verify` (self-signed certs),
+`username`, `password`. Redis Enterprise/Cloud presents a single proxy endpoint,
+so the standard client works; a raw OSS-cluster endpoint (with `MOVED`) is not
+supported. TLS uses the system root CAs unless `tls_skip_verify` is set.
 
 ## Workload / query profiles
 
@@ -166,9 +184,16 @@ with the timestamp and each series' value.
   - The threads continuously run a **set** of concrete random queries (composed
     from the enabled types). You control *when* it re-randomizes: **🔄 Refresh
     queries** (now) or the **auto** toggle (every N seconds).
-  - **⏸ Pause / ▶ Resume** freezes/unfreezes the whole workload (ingest, mutations
-    and queries) so you can inspect a steady state — expiry still proceeds, so you
-    can watch the index drain.
+  - **⏸ Pause / ▶ Resume** (top bar) freezes/unfreezes the whole workload (ingest,
+    mutations and queries) so you can inspect a steady state — expiry still
+    proceeds, so you can watch the index drain.
+  - **🕒 TTL on / 🚫 TTL off** (top bar) toggles whether *new* documents are written
+    with a whole-key TTL. Turn it off to ingest persistent docs (they never expire
+    and must always remain searchable) alongside the expiring ones.
+  - The threads/rate/timeout/limit + enabled types are applied by **Apply**;
+    `limit` and `timeout` are baked into the generated query set (visible in the
+    preview). Threads add load only up to `rate` — set `rate` to `0` to let threads
+    push maximum throughput.
 - **Generated query set** — shows the exact random queries the threads are running
   right now, so you can see the `LOAD` / `APPLY` / `GROUPBY` / wildcard variety.
 - **Live query feed:** a **sortable** table (click any column: time · type · query ·
@@ -182,7 +207,11 @@ with the timestamp and each series' value.
   `indexing`, `percent_indexed`, GC/cleaning — plus disk `INFO`
   (`search_disk_usage`, `async_reads_expired`, compaction). Placeholder-on-Flex
   fields (offset/key-table sizes, etc.) are intentionally omitted.
-- **Charts:** footprint over time, docs vs records, ingest & expire /s, query p50/p99.
+- **Charts:** footprint over time, docs vs records, ingest & expire /s, query
+  p50/p99. All are computed server-side over a smoothed/windowed sample (the
+  expire-rate is smoothed over ~10s since `num_docs` updates in bursts; latency is
+  a *recent* windowed percentile, not an all-time cumulative one), so they're
+  consistent across page reloads.
 
 The charts are drawn from an **in-process time-series** the harness samples from
 `INFO`/`FT.INFO` — it does **not** use RedisTimeSeries (`TS.*`), which isn't part

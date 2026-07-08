@@ -32,6 +32,8 @@ type Query struct {
 type Params struct {
 	Tiers     []string // plan/tier TAG values
 	PageDepth int      // upper bound for random LIMIT offsets
+	Limit     int      // result LIMIT (from the live control)
+	TimeoutMs int      // per-query TIMEOUT (0 = none)
 }
 
 var (
@@ -87,7 +89,14 @@ func buildSearch(rnd *rand.Rand, pick *model.Picker, gen *gendata.Generator, p P
 	if p.PageDepth > 0 && rnd.Intn(100) < 30 {
 		off = rnd.Intn(p.PageDepth)
 	}
-	add("LIMIT", off, 10+rnd.Intn(40))
+	num := p.Limit
+	if num < 1 {
+		num = 20
+	}
+	add("LIMIT", off, num)
+	if p.TimeoutMs > 0 {
+		add("TIMEOUT", p.TimeoutMs)
+	}
 	add("DIALECT", 2)
 	return Query{Cmd: "FT.SEARCH", Args: args, Display: strings.Join(disp, " "), NoContent: noContent}
 }
@@ -151,6 +160,9 @@ func buildAggregate(rnd *rand.Rand, pick *model.Picker, gen *gendata.Generator, 
 			add("SORTBY", 2, "@u", dir(rnd))
 		}
 		add("LIMIT", 0, 10+rnd.Intn(20))
+	}
+	if p.TimeoutMs > 0 {
+		add("TIMEOUT", p.TimeoutMs)
 	}
 	return Query{Cmd: "FT.AGGREGATE", Args: args, Display: strings.Join(disp, " ")}
 }

@@ -24,6 +24,7 @@ type Deps struct {
 	Tiers     []string
 	PageDepth int
 	Limit     int
+	TimeoutMs int
 	Live      func() (oracle.Sample, bool) // a currently-live (channel, token), if any
 }
 
@@ -61,11 +62,11 @@ func BuildOne(rnd *rand.Rand, profile string, d Deps) control.QueryItem {
 	switch profile {
 	case "channel_search":
 		ch, tok := d.channelTerm(rnd)
-		return search(profile, "@"+model.FieldChannel+":{"+ch+"} "+tok, 0, d.Limit, true)
+		return d.search(profile, "@"+model.FieldChannel+":{"+ch+"} "+tok, 0, true)
 
 	case "thread_search":
 		field, val := d.randScope(rnd)
-		return search(profile, "@"+field+":{"+val+"} "+d.randTerm(rnd), 0, d.Limit, true)
+		return d.search(profile, "@"+field+":{"+val+"} "+d.randTerm(rnd), 0, true)
 
 	case "tag_filter":
 		var scope string
@@ -81,7 +82,7 @@ func BuildOne(rnd *rand.Rand, profile string, d Deps) control.QueryItem {
 		if rnd.Intn(3) == 0 {
 			term += " -" + d.Gen.Word()
 		}
-		return search(profile, scope+" "+term, 0, d.Limit, true)
+		return d.search(profile, scope+" "+term, 0, true)
 
 	case "deep_pagination":
 		ch, tok := d.channelTerm(rnd)
@@ -89,11 +90,11 @@ func BuildOne(rnd *rand.Rand, profile string, d Deps) control.QueryItem {
 		if d.PageDepth > 0 {
 			off = rnd.Intn(d.PageDepth)
 		}
-		return search(profile, "@"+model.FieldChannel+":{"+ch+"} "+tok, off, d.Limit, true)
+		return d.search(profile, "@"+model.FieldChannel+":{"+ch+"} "+tok, off, true)
 
 	case "text_prefix":
 		ch, tok := d.channelTerm(rnd)
-		return search(profile, "@"+model.FieldChannel+":{"+ch+"} "+fuzzyOf(rnd, tok), 0, d.Limit, true)
+		return d.search(profile, "@"+model.FieldChannel+":{"+ch+"} "+fuzzyOf(rnd, tok), 0, true)
 
 	case "recent_timeline":
 		ch, _ := d.channelTerm(rnd)
@@ -104,41 +105,48 @@ func BuildOne(rnd *rand.Rand, profile string, d Deps) control.QueryItem {
 			"FILTER", "exists(@" + model.FieldTs + ")",
 			"APPLY", "to_number(@" + model.FieldTs + ")", "AS", "ts_num",
 			"SORTBY", 2, "@ts_num", dir, "LIMIT", 0, d.Limit}
-		return agg(profile, filter, tail,
-			"FT.AGGREGATE '"+filter+"' LOAD @ts @user_id FILTER exists(@ts) APPLY to_number(@ts) SORTBY @ts_num "+dir)
+		disp := "FT.AGGREGATE '" + filter + "' LOAD @ts @user_id FILTER exists(@ts) APPLY to_number(@ts) SORTBY @ts_num " + dir + " LIMIT 0 " + strconv.Itoa(d.Limit)
+		return d.agg(profile, filter, tail, disp)
 
 	case "plan_analytics":
 		gfield := groupables[rnd.Intn(len(groupables))]
 		redArgs, redDisp := randReducer(rnd)
 		tail := []any{"GROUPBY", 1, "@" + gfield}
 		tail = append(tail, redArgs...)
-		tail = append(tail, "SORTBY", 2, "@n", "DESC", "LIMIT", 0, 20)
-		return agg(profile, "*", tail, "FT.AGGREGATE '*' GROUPBY @"+gfield+" REDUCE "+redDisp+" SORTBY @n DESC")
+		tail = append(tail, "SORTBY", 2, "@n", "DESC", "LIMIT", 0, d.Limit)
+		disp := "FT.AGGREGATE '*' GROUPBY @" + gfield + " REDUCE " + redDisp + " SORTBY @n DESC LIMIT 0 " + strconv.Itoa(d.Limit)
+		return d.agg(profile, "*", tail, disp)
 
 	default: // "fuzz"
 		s, ok := d.Live()
-		q := fuzz.Build(rnd, d.Pick, d.Gen, fuzz.Params{Tiers: d.Tiers, PageDepth: d.PageDepth}, s, ok)
+		q := fuzz.Build(rnd, d.Pick, d.Gen, fuzz.Params{Tiers: d.Tiers, PageDepth: d.PageDepth, Limit: d.Limit, TimeoutMs: d.TimeoutMs}, s, ok)
 		return control.QueryItem{Profile: "fuzz", Cmd: q.Cmd, Args: q.Args, Display: q.Display, NoContent: q.NoContent}
 	}
 }
 
-// --- builders ---
+// --- builders (bake limit + timeout into the query so they're visible & effective) ---
 
-func search(profile, expr string, offset, num int, noContent bool) control.QueryItem {
+func (d Deps) search(profile, expr string, offset int, noContent bool) control.QueryItem {
 	args := []any{expr}
 	if noContent {
 		args = append(args, "NOCONTENT")
 	}
-	args = append(args, "LIMIT", offset, num, "DIALECT", 2)
-	disp := "FT.SEARCH " + expr
-	if offset > 0 {
-		disp += " LIMIT " + strconv.Itoa(offset) + " " + strconv.Itoa(num)
+	args = append(args, "LIMIT", offset, d.Limit)
+	disp := "FT.SEARCH " + expr + " LIMIT " + strconv.Itoa(offset) + " " + strconv.Itoa(d.Limit)
+	if d.TimeoutMs > 0 {
+		args = append(args, "TIMEOUT", d.TimeoutMs)
+		disp += " TIMEOUT " + strconv.Itoa(d.TimeoutMs)
 	}
+	args = append(args, "DIALECT", 2)
 	return control.QueryItem{Profile: profile, Cmd: "FT.SEARCH", Args: args, Display: disp, NoContent: noContent}
 }
 
-func agg(profile, filter string, tail []any, disp string) control.QueryItem {
+func (d Deps) agg(profile, filter string, tail []any, disp string) control.QueryItem {
 	args := append([]any{filter}, tail...)
+	if d.TimeoutMs > 0 {
+		args = append(args, "TIMEOUT", d.TimeoutMs)
+		disp += " TIMEOUT " + strconv.Itoa(d.TimeoutMs)
+	}
 	return control.QueryItem{Profile: profile, Cmd: "FT.AGGREGATE", Args: args, Display: disp}
 }
 

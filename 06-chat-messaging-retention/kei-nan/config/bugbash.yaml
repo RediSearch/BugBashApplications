@@ -50,11 +50,16 @@ body: { min_words: 8, max_words: 60, vocab_high: 5000000 }
 # Coexisting short- and long-lived retention tiers. At steady state the live set
 # ~= ingest_rate * (weighted-avg TTL); expire-rate converges on ingest-rate and
 # on-disk footprint should PLATEAU rather than grow without bound.
+#
+# IMPORTANT: the footprint only plateaus once EVERY tier has cycled at least once,
+# so the max TTL here is kept well under `duration` (60m). For a longer soak with
+# longer retention (hours/days), raise `duration` to >= 2x the max TTL — otherwise
+# the long tiers never expire and the plateau verdict will always read GROWING.
 tiers:
-  - { name: disappearing, weight: 25, ttl: 5m }
-  - { name: free,         weight: 45, ttl: 30m }
-  - { name: pro,          weight: 20, ttl: 2h }
-  - { name: enterprise,   weight: 10, ttl: 12h }
+  - { name: disappearing, weight: 30, ttl: 1m }
+  - { name: free,         weight: 40, ttl: 5m }
+  - { name: pro,          weight: 20, ttl: 15m }
+  - { name: enterprise,   weight: 10, ttl: 25m }
 
 sample:
   interval: 5s

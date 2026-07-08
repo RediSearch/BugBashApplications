@@ -60,12 +60,15 @@ var KnownProfiles = map[string]string{
 
 // Config is the full harness configuration.
 type Config struct {
-	Addr     string   `yaml:"addr"`
-	Password string   `yaml:"password"`
-	Index    string   `yaml:"index"`
-	Prefix   string   `yaml:"prefix"`
-	Duration Duration `yaml:"duration"`
-	Seed     int64    `yaml:"seed"`
+	Addr          string   `yaml:"addr"`
+	Username      string   `yaml:"username"` // ACL user (cloud); empty = default
+	Password      string   `yaml:"password"`
+	TLS           bool     `yaml:"tls"`             // enable TLS (cloud endpoints)
+	TLSSkipVerify bool     `yaml:"tls_skip_verify"` // skip cert verification (self-signed)
+	Index         string   `yaml:"index"`
+	Prefix        string   `yaml:"prefix"`
+	Duration      Duration `yaml:"duration"`
+	Seed          int64    `yaml:"seed"`
 
 	Tenants           int `yaml:"tenants"`
 	ChannelsPerTenant int `yaml:"channels_per_tenant"`
@@ -110,7 +113,8 @@ type Config struct {
 	Oracle struct {
 		SampleRate float64 `yaml:"sample_rate"`
 		MaxTracked int     `yaml:"max_tracked"`
-		GraceMs    int     `yaml:"grace_ms"`
+		GraceMs    int     `yaml:"grace_ms"` // grace for async deletion de-index
+		SkewMs     int     `yaml:"skew_ms"`  // client/server clock-skew tolerance for expiry
 	} `yaml:"oracle"`
 
 	Web struct {
@@ -161,7 +165,7 @@ func Default() *Config {
 	c.Sample.Interval = Duration(2 * time.Second)
 	c.Sample.GCInterval = Duration(10 * time.Second)
 	c.Sample.ForceGC = true
-	c.Oracle.SampleRate, c.Oracle.MaxTracked, c.Oracle.GraceMs = 1.0, 500000, 1500
+	c.Oracle.SampleRate, c.Oracle.MaxTracked, c.Oracle.GraceMs, c.Oracle.SkewMs = 1.0, 500000, 1500, 1000
 	c.Web.Enabled, c.Web.Addr = true, ":8080"
 	return c
 }
@@ -197,6 +201,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Body.MinWords < 1 || c.Body.MaxWords < c.Body.MinWords {
 		return fmt.Errorf("body word range invalid")
+	}
+	if c.Ingest.Workers < 1 {
+		return fmt.Errorf("ingest.workers must be >= 1")
+	}
+	if c.Sample.Interval.D() <= 0 {
+		return fmt.Errorf("sample.interval must be > 0")
 	}
 	if c.Ingest.Pipeline < 1 {
 		c.Ingest.Pipeline = 1

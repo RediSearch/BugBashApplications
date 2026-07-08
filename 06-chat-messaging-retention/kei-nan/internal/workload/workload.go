@@ -6,6 +6,7 @@ package workload
 
 import (
 	"context"
+	"math"
 	"math/rand"
 	"sync"
 	"time"
@@ -124,6 +125,7 @@ func (r *Runner) ingester(ctx context.Context, id int, lim *Limiter) {
 		}
 		lim.Wait(ctx)
 
+		noExpire := r.ctrl.NoExpire()
 		batch := make([]*model.Message, 0, pipeline)
 		pend := make([]pending, 0, pipeline)
 		nowMs := time.Now().UnixMilli()
@@ -133,6 +135,10 @@ func (r *Runner) ingester(ctx context.Context, id int, lim *Limiter) {
 			cid, channel := pick.ChannelID(tid)
 			body, token := gen.Body()
 			seq := r.seq.next()
+			ttl := tier.TTL.D()
+			if noExpire {
+				ttl = 0 // persistent: no whole-key TTL
+			}
 			m := &model.Message{
 				Key:      model.Key(r.cfg.Prefix, seq),
 				Seq:      seq,
@@ -143,11 +149,11 @@ func (r *Runner) ingester(ctx context.Context, id int, lim *Limiter) {
 				Plan:     tier.Name,
 				Body:     body,
 				Token:    token,
-				TTL:      tier.TTL.D(),
+				TTL:      ttl,
 				CreateMs: nowMs,
 			}
 			batch = append(batch, m)
-			pend = append(pend, pending{msg: m, ttlMs: int64(tier.TTL.D() / time.Millisecond)})
+			pend = append(pend, pending{msg: m, ttlMs: int64(ttl / time.Millisecond)})
 		}
 
 		if err := r.cli.IngestBatch(ctx, batch); err != nil {
@@ -161,7 +167,11 @@ func (r *Runner) ingester(ctx context.Context, id int, lim *Limiter) {
 		// makes the "expired before t0" check free of false positives.
 		afterMs := time.Now().UnixMilli()
 		for _, p := range pend {
-			r.orc.Add(p.msg.Key, p.msg.Channel, p.msg.Token, afterMs+p.ttlMs, p.msg.Seq)
+			exp := int64(math.MaxInt64) // persistent docs (ttl 0) never expire
+			if p.ttlMs > 0 {
+				exp = afterMs + p.ttlMs
+			}
+			r.orc.Add(p.msg.Key, p.msg.Channel, p.msg.Token, exp, p.msg.Seq)
 		}
 		r.met.C.Ingested.Add(int64(len(batch)))
 	}
@@ -231,9 +241,8 @@ func (r *Runner) queryer(ctx context.Context, id int) {
 			continue
 		}
 		iter++
-		to := r.ctrl.TimeoutMs()
 		start := time.Now()
-		total, err := r.runItem(ctx, item, to)
+		total, err := r.runItem(ctx, item)
 		lat := time.Since(start)
 		r.met.RecordQuery(item.Profile, lat, slowMs)
 		if err != nil && ctx.Err() == nil {
@@ -257,12 +266,13 @@ func (r *Runner) queryer(ctx context.Context, id int) {
 			if es, ok := r.orc.ExpiredSample(); ok {
 				pq := "@" + model.FieldChannel + ":{" + es.Channel + "} " + es.Token
 				pt0 := time.Now().UnixMilli()
-				_, pkeys, perr := r.cli.Search(ctx, pq, r.ctrl.Limit(), to)
+				_, pkeys, perr := r.cli.Search(ctx, pq, r.ctrl.Limit(), r.ctrl.TimeoutMs())
 				if perr == nil {
 					hit := false
 					for _, k := range pkeys {
 						if k == es.Key {
-							hit = true
+							hit = true // counted by RecordProbe; don't double-count via Check
+							continue
 						}
 						r.orc.Check(k, pt0)
 					}
@@ -275,13 +285,11 @@ func (r *Runner) queryer(ctx context.Context, id int) {
 
 // runItem executes one pooled query and returns the match/row count. When the
 // query is a NOCONTENT search, the returned keys feed the no-stale-hits oracle.
-func (r *Runner) runItem(ctx context.Context, item control.QueryItem, to int) (int64, error) {
-	full := make([]any, 0, len(item.Args)+4)
+// LIMIT/TIMEOUT/DIALECT are already baked into item.Args by querygen.
+func (r *Runner) runItem(ctx context.Context, item control.QueryItem) (int64, error) {
+	full := make([]any, 0, len(item.Args)+2)
 	full = append(full, item.Cmd, r.cfg.Index)
 	full = append(full, item.Args...)
-	if to > 0 {
-		full = append(full, "TIMEOUT", to)
-	}
 	t0 := time.Now().UnixMilli()
 	total, keys, err := r.cli.RawCount(ctx, full...)
 	if err == nil && item.NoContent {
@@ -297,7 +305,7 @@ func (r *Runner) runItem(ctx context.Context, item control.QueryItem, to int) (i
 func (r *Runner) regenPool() {
 	d := querygen.Deps{
 		Pick: r.genPick, Gen: r.genGen, Tiers: r.tierNames,
-		PageDepth: r.cfg.Query.PageDepth, Limit: r.ctrl.Limit(), Live: r.orc.LiveSample,
+		PageDepth: r.cfg.Query.PageDepth, Limit: r.ctrl.Limit(), TimeoutMs: r.ctrl.TimeoutMs(), Live: r.orc.LiveSample,
 	}
 	r.ctrl.SetPool(querygen.Pool(r.genRnd, r.cfg.Query.PoolSize, r.ctrl.Profiles(), d))
 }
@@ -411,6 +419,19 @@ func (r *Runner) slider(ctx context.Context, lim *Limiter) {
 func (r *Runner) metricLoop(ctx context.Context) {
 	tick := time.NewTicker(r.cfg.Sample.Interval.D())
 	defer tick.Stop()
+
+	// State for smoothed rates + windowed latency percentiles.
+	prevIng := r.met.C.Ingested.Load()
+	prevDel := r.met.C.Deleted.Load()
+	prevQ := r.met.C.Queries.Load()
+	prevBuckets := r.met.Lat.Snapshot()
+	prevT := r.met.Elapsed().Seconds()
+	type docPoint struct {
+		t    float64
+		docs int64
+	}
+	var docWin []docPoint // ~10s window to smooth doc-growth (num_docs is bursty)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -420,8 +441,45 @@ func (r *Runner) metricLoop(ctx context.Context) {
 			si, _ := r.cli.ServerInfo(sctx)
 			fi, _ := r.cli.Info(sctx)
 			cancel()
+
+			now := r.met.Elapsed().Seconds()
+			dt := now - prevT
+			if dt <= 0 {
+				dt = r.cfg.Sample.Interval.D().Seconds()
+			}
+			ing, del, q := r.met.C.Ingested.Load(), r.met.C.Deleted.Load(), r.met.C.Queries.Load()
+			ingestRate := float64(ing-prevIng) / dt
+			deleteRate := float64(del-prevDel) / dt
+			queryRate := float64(q-prevQ) / dt
+
+			// Smoothed doc growth over ~10s: num_docs (FT.INFO) updates in bursts,
+			// so a 2-sample delta is far too noisy for an expire-rate estimate.
+			docWin = append(docWin, docPoint{now, fi.NumDocs})
+			if len(docWin) > 6 {
+				docWin = docWin[len(docWin)-6:]
+			}
+			docGrowth := 0.0
+			if o := docWin[0]; now-o.t > 0 {
+				docGrowth = float64(fi.NumDocs-o.docs) / (now - o.t)
+			}
+			expireRate := ingestRate - docGrowth - deleteRate
+			if expireRate < 0 {
+				expireRate = 0
+			}
+
+			// Windowed (recent) latency: percentile over this interval's deltas.
+			snap := r.met.Lat.Snapshot()
+			delta := make([]int64, len(snap))
+			for i := range snap {
+				delta[i] = snap[i]
+				if i < len(prevBuckets) {
+					delta[i] -= prevBuckets[i]
+				}
+			}
+			prevBuckets = snap
+
 			r.met.AddSample(metrics.Sample{
-				TSec:              r.met.Elapsed().Seconds(),
+				TSec:              now,
 				DiskUsage:         si.DiskUsage,
 				UsedMem:           si.UsedMemory,
 				NumDocs:           fi.NumDocs,
@@ -430,7 +488,14 @@ func (r *Runner) metricLoop(ctx context.Context) {
 				AsyncExpired:      si.AsyncReadsExpired,
 				CompactionCycles:  si.CompactionCycles,
 				PendingCompaction: si.PendingCompactionBytes,
+				IngestRate:        ingestRate,
+				ExpireRate:        expireRate,
+				DeleteRate:        deleteRate,
+				QueryRate:         queryRate,
+				P50:               metrics.PercentileOf(delta, 0.50),
+				P99:               metrics.PercentileOf(delta, 0.99),
 			}, si.DiskMode)
+			prevIng, prevDel, prevQ, prevT = ing, del, q, now
 			r.met.SetStatus(metrics.Status{
 				NumDocs:              fi.NumDocs,
 				NumRecords:           fi.NumRecords,

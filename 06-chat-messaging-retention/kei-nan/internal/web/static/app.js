@@ -6,9 +6,6 @@ const C = {
 };
 
 let selectedChannel = null;
-const histRate = []; // {t, ingest, expire}
-const histLat = [];  // {t, p50, p99}
-const HIST_MAX = 600;
 
 async function getJSON(url) { const r = await fetch(url); if (!r.ok) throw new Error(r.status + " " + url); return r.json(); }
 async function postJSON(url, body) {
@@ -43,7 +40,7 @@ const HELP = {
   stale: "Correctness signal. A stale hit is a query result that was ALREADY EXPIRED (or deleted) before the query ran — it must never be returned. 0 = the index correctly hides expired docs at query time; >0 = it is leaking expired content (a bug). OSS/in-RAM RediSearch shows many under churn; the disk build should stay 0.",
   p99: "99th-percentile query latency across all query profiles.",
   slow: "Queries at/over the slow threshold (default = the 500ms server timeout) — a timeout-risk signal, driven by heavy profiles (deep pagination, wide GROUPBY).",
-  recall: "Of channel-scoped queries for a known-live message, the % that actually returned it. Misses are usually async-indexing lag.",
+  hit: "Fraction of searches that returned at least one match. It's a liveness signal, not strict recall — rare-term, negation and fuzzy queries legitimately return nothing, so a mid-range value is normal.",
 };
 
 function renderStats(s) {
@@ -56,7 +53,7 @@ function renderStats(s) {
     kpi("stale results", fmtNum(s.correctness.stale_hits), "", s.correctness.stale_hits > 0 ? "hot" : "good", HELP.stale),
     kpi("query p99", s.latency.p99.toFixed(0), "ms", "", HELP.p99),
     kpi("slow queries", fmtNum(s.latency.slow), "≥" + s.correctness.slow_thresh_ms + "ms", "", HELP.slow),
-    kpi("recall", s.correctness.recall_pct.toFixed(0), "%", "", HELP.recall),
+    kpi("hit rate", s.correctness.recall_pct.toFixed(0), "%", "", HELP.hit),
   ].join("");
 
   document.getElementById("badge-elapsed").textContent = "t=" + Math.round(s.elapsed_sec) + "s";
@@ -70,11 +67,6 @@ function renderStats(s) {
   else if (s.footprint.plateau) { pl.textContent = "footprint: PLATEAU"; pl.className = "badge ok"; }
   else { pl.textContent = "footprint: GROWING"; pl.className = "badge warn"; }
   document.getElementById("verdict-note").textContent = s.footprint.note || "";
-
-  histRate.push({ t: s.elapsed_sec, ingest: s.rates.ingest, expire: s.rates.expire });
-  histLat.push({ t: s.elapsed_sec, p50: s.latency.p50, p99: s.latency.p99 });
-  if (histRate.length > HIST_MAX) histRate.shift();
-  if (histLat.length > HIST_MAX) histLat.shift();
 
   renderIndexStatus(idx, s.disk_mode);
   drawCharts(s);
@@ -189,11 +181,11 @@ function drawCharts(s) {
     { name: "num_docs", color: C.green, pts: series.map((p) => [p.t, p.num_docs]) },
     { name: "num_records", color: C.amber, pts: series.map((p) => [p.t, p.num_records]) }], fmtNum);
   drawLine(document.getElementById("c-rate2"), [
-    { name: "ingest/s", color: C.green, pts: histRate.map((p) => [p.t, p.ingest]) },
-    { name: "expire/s", color: C.red, pts: histRate.map((p) => [p.t, p.expire]) }], fmtNum);
+    { name: "ingest/s", color: C.green, pts: series.map((p) => [p.t, p.ingest_rate]) },
+    { name: "expire/s", color: C.red, pts: series.map((p) => [p.t, p.expire_rate]) }], fmtNum);
   drawLine(document.getElementById("c-lat"), [
-    { name: "p50", color: C.amber, pts: histLat.map((p) => [p.t, p.p50]) },
-    { name: "p99", color: C.red, pts: histLat.map((p) => [p.t, p.p99]) }], (v) => v.toFixed(0) + " ms");
+    { name: "p50", color: C.amber, pts: series.map((p) => [p.t, p.p50]) },
+    { name: "p99", color: C.red, pts: series.map((p) => [p.t, p.p99]) }], (v) => v.toFixed(0) + " ms");
 }
 
 // ---------- query load controls ----------
@@ -207,13 +199,17 @@ function mixRow(p) {
     <input type="number" class="mx-wt" min="1" value="${wt}" ${on ? "" : "disabled"} />
   </div>`;
 }
-let paused = false;
+let paused = false, noExpire = false;
 function applyPausedUI() {
   const btn = document.getElementById("c-pause");
   btn.textContent = paused ? "▶ Resume" : "⏸ Pause";
   btn.classList.toggle("primary", paused);
-  const b = document.getElementById("badge-paused");
-  b.style.display = paused ? "" : "none";
+  document.getElementById("badge-paused").style.display = paused ? "" : "none";
+}
+function applyNoExpireUI() {
+  const btn = document.getElementById("c-noexpire");
+  btn.textContent = noExpire ? "🚫 TTL: off" : "🕒 TTL: on";
+  btn.classList.toggle("primary", noExpire);
 }
 async function loadControl() {
   try {
@@ -224,6 +220,7 @@ async function loadControl() {
     document.getElementById("c-timeout").value = c.timeout_ms;
     document.getElementById("c-limit").value = c.limit;
     paused = c.paused; applyPausedUI();
+    noExpire = c.no_expire; applyNoExpireUI();
     document.getElementById("mix").innerHTML = c.profiles.map(mixRow).join("");
     document.querySelectorAll("#mix .mx-on").forEach((cb) => cb.addEventListener("change", () => {
       const row = cb.closest(".mixrow"); const wt = row.querySelector(".mx-wt");
@@ -284,6 +281,10 @@ function setAuto(on) {
 async function pauseToggle() {
   paused = !paused; applyPausedUI();
   try { await postJSON("/api/control", { paused }); } catch (e) {}
+}
+async function noExpireToggle() {
+  noExpire = !noExpire; applyNoExpireUI();
+  try { await postJSON("/api/control", { no_expire: noExpire }); } catch (e) {}
 }
 
 // ---------- conversations + inline inspect search ----------
@@ -380,8 +381,12 @@ loadConfig(); loadControl(); tickStats(); refreshChannels(); refreshMessages(); 
 document.getElementById("c-apply").addEventListener("click", applyControl);
 document.getElementById("c-refresh").addEventListener("click", refreshQueries);
 document.getElementById("c-pause").addEventListener("click", pauseToggle);
+document.getElementById("c-noexpire").addEventListener("click", noExpireToggle);
 document.getElementById("c-auto").addEventListener("change", (e) => setAuto(e.target.checked));
 document.getElementById("c-auto-int").addEventListener("change", () => { if (document.getElementById("c-auto").checked) setAuto(true); });
+// The Refresh/auto controls live inside the collapsible panel header — don't let
+// clicking them collapse the panel.
+document.getElementById("setctl").addEventListener("click", (e) => e.stopPropagation());
 document.getElementById("s-run").addEventListener("click", refreshMessages);
 document.getElementById("s-clear").addEventListener("click", () => { document.getElementById("s-text").value = ""; refreshMessages(); });
 document.getElementById("s-text").addEventListener("keydown", (e) => { if (e.key === "Enter") refreshMessages(); });

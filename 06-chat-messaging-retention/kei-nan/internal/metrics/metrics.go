@@ -46,13 +46,21 @@ func (h *Hist) Record(d time.Duration) {
 	h.buckets[len(h.buckets)-1].Add(1)
 }
 
-// Percentile returns an upper-bound estimate (ms) for percentile p in [0,1].
-func (h *Hist) Percentile(p float64) float64 {
-	var total int64
-	counts := make([]int64, len(h.buckets))
+// Snapshot returns the current per-bucket counts (for windowed percentiles).
+func (h *Hist) Snapshot() []int64 {
+	out := make([]int64, len(h.buckets))
 	for i := range h.buckets {
-		counts[i] = h.buckets[i].Load()
-		total += counts[i]
+		out[i] = h.buckets[i].Load()
+	}
+	return out
+}
+
+// PercentileOf returns an upper-bound estimate (ms) for percentile p over the
+// given bucket counts (e.g. a windowed delta).
+func PercentileOf(counts []int64, p float64) float64 {
+	var total int64
+	for _, c := range counts {
+		total += c
 	}
 	if total == 0 {
 		return 0
@@ -71,7 +79,12 @@ func (h *Hist) Percentile(p float64) float64 {
 	return latBoundsMs[len(latBoundsMs)-1] * 2
 }
 
-// Sample is one footprint observation over time.
+// Percentile returns an all-time upper-bound estimate (ms) for percentile p.
+func (h *Hist) Percentile(p float64) float64 { return PercentileOf(h.Snapshot(), p) }
+
+// Sample is one observation over time. Rates and latency percentiles are
+// computed server-side by the sampler (windowed) so the charts are smooth and
+// consistent across page reloads.
 type Sample struct {
 	TSec              float64 `json:"t"`
 	DiskUsage         int64   `json:"disk_usage"`
@@ -82,6 +95,12 @@ type Sample struct {
 	AsyncExpired      int64   `json:"async_expired"`
 	CompactionCycles  int64   `json:"compaction_cycles"`
 	PendingCompaction int64   `json:"pending_compaction"`
+	IngestRate        float64 `json:"ingest_rate"`
+	ExpireRate        float64 `json:"expire_rate"`
+	DeleteRate        float64 `json:"delete_rate"`
+	QueryRate         float64 `json:"query_rate"`
+	P50               float64 `json:"p50"` // windowed (recent) latency, ms
+	P99               float64 `json:"p99"`
 }
 
 // Metrics aggregates everything.
@@ -92,7 +111,7 @@ type Metrics struct {
 
 	mu       sync.RWMutex
 	series   []Sample
-	diskMode bool
+	diskMode atomic.Bool
 
 	profMu     sync.Mutex
 	profCounts map[string]int64
@@ -211,10 +230,10 @@ func (m *Metrics) ProfileCounts() map[string]int64 {
 func (m *Metrics) AddSample(s Sample, diskMode bool) {
 	m.mu.Lock()
 	m.series = append(m.series, s)
-	if diskMode {
-		m.diskMode = true
-	}
 	m.mu.Unlock()
+	if diskMode {
+		m.diskMode.Store(true)
+	}
 }
 
 // Series returns a copy of the footprint series.
@@ -240,7 +259,7 @@ type Verdict struct {
 // 20% as warmup) and decides plateau vs growth.
 func (m *Metrics) Plateau() Verdict {
 	series := m.Series()
-	useDisk := m.diskMode
+	useDisk := m.diskMode.Load()
 	metric := "used_mem"
 	if useDisk {
 		metric = "disk_usage"

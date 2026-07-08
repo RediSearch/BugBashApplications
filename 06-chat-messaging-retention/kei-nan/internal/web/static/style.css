@@ -28,7 +28,10 @@ h1, h2 { margin: 0; }
 .logo { font-size: 26px; color: var(--blue); }
 .brand h1 { font-size: 18px; letter-spacing: .3px; }
 .sub { color: var(--muted); font-size: 12px; }
-.badges { display: flex; gap: 8px; flex-wrap: wrap; }
+.badges { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.topbtn { padding: 5px 12px; border-radius: 999px; font-size: 12px; font-weight: 700; border: 1px solid var(--line); background: var(--panel2); color: var(--text); cursor: pointer; }
+.topbtn:hover { border-color: var(--blue); }
+.topbtn.primary { border-color: var(--amber); background: rgba(242,177,52,.18); color: var(--amber); }
 .badge { padding: 5px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--panel2); border: 1px solid var(--line); }
 .badge.ok { background: rgba(53,194,143,.15); border-color: var(--green); color: var(--green); }
 .badge.bad { background: rgba(239,95,107,.15); border-color: var(--red); color: var(--red); }
@@ -91,7 +94,9 @@ button { padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); b
 button:hover { border-color: var(--blue); }
 button.primary { border-color: var(--blue); background: rgba(76,141,255,.18); color: var(--blue); }
 button.primary:hover { background: rgba(76,141,255,.3); }
-.mix-head { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.apply-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.setctl { display: flex; align-items: center; gap: 10px; }
+.mix-head { font-size: 12px; color: var(--muted); margin-bottom: 6px; margin-top: 10px; }
 .mix { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
 .mixrow { display: grid; grid-template-columns: auto 1fr 64px; gap: 8px; align-items: center; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; }
 .mixrow.off { opacity: .5; }
