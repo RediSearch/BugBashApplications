@@ -138,6 +138,28 @@ Different failure mode from incidents 1–2:
   `INFO keyspace` line is byte-identical across 25 min — even `expires` and
   `avg_ttl` frozen — so it is a **stale cached snapshot**, not a live
   single-shard view. Per-key R/W still healthy throughout.
+- 10:44: first movement in 40 min — the INFO snapshot ticked once
+  (keys +4,863 with zero client traffic; resync?), then froze again.
+  11:04, 11:12: still refusing FT.SEARCH. **~2h+ wedged.**
+- **11:15 — traffic restarted on Raz's call** (`out/mixed-full-t25b/`, then
+  `t25c` after a harness fix, see below): 8 churn + 16 storm + 2 verify.
+  Churn writes mostly fine (60–70ms) but a fraction hit 30s socket timeouts;
+  storm queries all fail fast on the topology error (~300k+ errors logged in
+  the first minutes — the refusal path itself is at least cheap/stable).
+- **11:30 — keyspace partially unreachable, quantified:** probing 30
+  spread-out keys with a 3s budget: 27 answered instantly, **3 hung (~10%)**.
+  So per-key ops to ~1 shard's worth of slots hang indefinitely; everything
+  else is fast. Explains churn's intermittent 30s timeouts and DBSIZE
+  hanging (fan-out touches the dead slice), and means "writes are healthy"
+  was only ~90% true.
+
+### Harness bug found by incident 3 (fixed, not a DB issue)
+
+All 8 churn workers died on their *first* op error:
+`stats.event("churn_error", op=op, ...)` collided with `event()`'s positional
+`op` arg → `TypeError` → worker crash. Never triggered before because churn
+had a clean run until this incident. Fixed (`failed_op=`), run relaunched as
+`mixed-full-t25c`; churn now survives errors and logs them.
 
 ### Mixed-run health snapshots
 
