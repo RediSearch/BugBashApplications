@@ -26,9 +26,12 @@ type Client struct {
 	index string
 }
 
-// Options configures the connection. Username/Password/TLS support cloud
-// endpoints (e.g. Redis Cloud / Enterprise Flex over TLS with ACL auth).
+// Options configures the connection. A full URL (redis://|rediss://, typically
+// from a cloud provider) takes precedence; otherwise Addr + Username/Password/TLS
+// are used. All three support cloud endpoints (e.g. Redis Cloud / Enterprise Flex
+// over TLS with ACL auth).
 type Options struct {
+	URL           string // full connection URL; overrides Addr/Username/Password/TLS
 	Addr          string
 	Username      string
 	Password      string
@@ -41,24 +44,47 @@ type Options struct {
 // New dials the server. RESP2 is forced so FT.INFO / FT.SEARCH replies are plain
 // arrays that are simple to parse.
 func New(o Options) (*Client, error) {
-	ropts := &redis.Options{
-		Addr:     o.Addr,
-		Username: o.Username,
-		Password: o.Password,
-		Protocol: 2,
-		PoolSize: o.PoolSize,
+	var ropts *redis.Options
+	if o.URL != "" {
+		p, err := redis.ParseURL(o.URL)
+		if err != nil {
+			// Deliberately do NOT include the URL in the error — it carries the
+			// password.
+			return nil, fmt.Errorf("parse redis url: %w", err)
+		}
+		ropts = p
+		if o.TLSSkipVerify && ropts.TLSConfig != nil {
+			ropts.TLSConfig.InsecureSkipVerify = true
+		}
+	} else {
+		ropts = &redis.Options{Addr: o.Addr, Username: o.Username, Password: o.Password}
+		if o.TLS {
+			ropts.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: o.TLSSkipVerify}
+		}
 	}
-	if o.TLS {
-		ropts.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: o.TLSSkipVerify}
-	}
+	ropts.Protocol = 2 // force RESP2 regardless of what the URL requested
+	ropts.PoolSize = o.PoolSize
 	rdb := redis.NewClient(ropts)
 	c := &Client{rdb: rdb, index: o.Index}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := rdb.Ping(ctx).Err(); err != nil {
-		return nil, fmt.Errorf("ping %s: %w", o.Addr, err)
+		return nil, fmt.Errorf("ping %s: %w", ropts.Addr, err) // ropts.Addr is host:port only
 	}
 	return c, nil
+}
+
+// AddrFromURL returns just the host:port of a connection URL, with no
+// credentials, for display/logging. Returns "" if url is empty or unparseable.
+func AddrFromURL(url string) string {
+	if url == "" {
+		return ""
+	}
+	p, err := redis.ParseURL(url)
+	if err != nil {
+		return ""
+	}
+	return p.Addr
 }
 
 // Close releases the connection pool.

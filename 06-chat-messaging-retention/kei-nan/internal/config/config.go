@@ -60,6 +60,7 @@ var KnownProfiles = map[string]string{
 
 // Config is the full harness configuration.
 type Config struct {
+	URL           string   `yaml:"url"` // full redis://|rediss:// URL; overrides addr/username/password/tls
 	Addr          string   `yaml:"addr"`
 	Username      string   `yaml:"username"` // ACL user (cloud); empty = default
 	Password      string   `yaml:"password"`

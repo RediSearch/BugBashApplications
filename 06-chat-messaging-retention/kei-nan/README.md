@@ -91,25 +91,43 @@ Open the dashboard at **http://localhost:8080**. It stays up after the run
 completes so you can inspect the final state (Ctrl-C to exit). Confirm the disk
 path is live with `redis-cli INFO search | grep search_disk_usage`.
 
-Flags: `-addr`, `-config`, `-duration`, `-web-addr`, `-flush`, `-no-web`, `-seed`,
-`-password`, `-username`, `-tls`.
+Flags: `-url`, `-addr`, `-config`, `-duration`, `-web-addr`, `-flush`, `-no-web`,
+`-seed`, `-password`, `-username`, `-tls`.
 
 ### Connecting to a cloud endpoint
 
 The connection is a **launch-time** parameter (the harness connects once, creates
 the index, then runs) — there's no connection box in the dashboard, which only
-controls the workload. Point it at a cloud Flex/BigRedis endpoint with flags or
-config:
+controls the workload.
+
+**Recommended (keeps the password out of shell history and git): a full URL via
+`.env`.** Copy `.env.example` to `.env` (gitignored) and set your cluster's
+connection string:
+
+```bash
+cp .env.example .env      # then edit .env:
+#   CHATSTRESS_URL=rediss://default:<password>@my-endpoint.cloud.redislabs.com:12345
+set -a; source .env; set +a
+./bin/chatstress run -config config/bugbash.yaml
+```
+
+`rediss://` enables TLS; `redis://` is plaintext. The harness reads
+`CHATSTRESS_URL` automatically; you can also pass the URL explicitly with `-url`.
+Only `host:port` is ever printed/logged, never the credentials.
+
+Alternatively, use discrete flags or config keys:
 
 ```bash
 ./bin/chatstress run -config config/bugbash.yaml \
   -addr my-endpoint.cloud.redislabs.com:6379 -tls -username default -password "$REDIS_PASSWORD"
 ```
 
-Config equivalents: `addr`, `tls: true`, `tls_skip_verify` (self-signed certs),
-`username`, `password`. Redis Enterprise/Cloud presents a single proxy endpoint,
-so the standard client works; a raw OSS-cluster endpoint (with `MOVED`) is not
-supported. TLS uses the system root CAs unless `tls_skip_verify` is set.
+Config equivalents: `url`, or `addr` + `tls: true` / `tls_skip_verify`
+(self-signed certs) / `username` / `password`. Precedence: `-url` flag >
+`$CHATSTRESS_URL` > config `url` > `addr`. Redis Enterprise/Cloud presents a
+single proxy endpoint, so the standard client works; a raw OSS-cluster endpoint
+(with `MOVED`) is not supported. TLS uses the system root CAs unless
+`tls_skip_verify` is set.
 
 ## Workload / query profiles
 

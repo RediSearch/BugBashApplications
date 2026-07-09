@@ -92,25 +92,23 @@ func (l *RateLimiter) run() {
 	t := time.NewTicker(tick)
 	defer t.Stop()
 	var acc float64 // fractional token accumulator (handles low rates)
+	prev := -1      // last observed rate, to detect changes
 	for {
 		select {
 		case <-l.stop:
 			return
 		case <-t.C:
 			r := l.rate()
+			// On any rate DROP (including ->0), flush buffered permits. Otherwise a
+			// backlog of stale tokens (e.g. accumulated while unlimited, or when
+			// workers are latency-bound and can't keep up) lets workers burst at
+			// full capacity for seconds before the new, lower rate takes effect.
+			if r < prev {
+				drain(l.ch)
+			}
+			prev = r
 			if r <= 0 {
-				// Unlimited: new Wait() callers short-circuit, but a worker already
-				// blocked on <-l.ch (from when a rate WAS set) won't re-check the
-				// rate until it receives a token — so keep the bucket topped up to
-				// release them promptly.
-				acc = 0
-				for i := 0; i < cap(l.ch); i++ {
-					select {
-					case l.ch <- struct{}{}:
-					default:
-						i = cap(l.ch)
-					}
-				}
+				acc = 0 // unlimited: Wait() returns without needing a token
 				continue
 			}
 			acc += float64(r) * tick.Seconds()
@@ -128,15 +126,35 @@ func (l *RateLimiter) run() {
 	}
 }
 
-// Wait blocks for a token, unless the rate is unlimited (returns immediately) or
-// ctx is done.
-func (l *RateLimiter) Wait(ctx context.Context) {
-	if l.rate() <= 0 {
-		return
+// drain empties a token channel without blocking.
+func drain(ch chan struct{}) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
 	}
-	select {
-	case <-l.ch:
-	case <-ctx.Done():
+}
+
+// Wait blocks for a token. An unlimited rate (<=0) returns immediately, and a
+// rate change is picked up within the poll interval even while blocked — so
+// switching TO unlimited never strands a worker waiting on the token channel,
+// and no bucket "top-up" hack is needed.
+func (l *RateLimiter) Wait(ctx context.Context) {
+	const poll = 50 * time.Millisecond
+	for {
+		if l.rate() <= 0 {
+			return
+		}
+		select {
+		case <-l.ch:
+			return
+		case <-ctx.Done():
+			return
+		case <-time.After(poll):
+			// re-check the rate (handles the ->0 transition without a token)
+		}
 	}
 }
 

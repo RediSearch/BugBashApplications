@@ -3,3 +3,11 @@
 /out/
 chatstress
 flexdata/
+
+# Secrets — cloud connection URLs live here and must NEVER be committed.
+# (.env.example is the committed placeholder.)
+.env
+.env.*
+!.env.example
+config/local.yaml
+config/*.local.yaml
