@@ -68,3 +68,77 @@ func (l *Limiter) Close() {
 		close(l.stop)
 	}
 }
+
+// RateLimiter is a shared token-bucket whose target rate is read LIVE on every
+// tick (0 = unlimited). Unlike a per-worker pre-sleep, tokens are produced
+// independently of query latency, so N workers blocking on Wait() deliver the
+// configured aggregate rate (capped only by what the workers can actually
+// sustain). Used by the query workers so the "rate" control is honored.
+type RateLimiter struct {
+	ch   chan struct{}
+	rate func() int
+	stop chan struct{}
+}
+
+// NewRateLimiter starts a token producer reading rate() live.
+func NewRateLimiter(rate func() int) *RateLimiter {
+	l := &RateLimiter{ch: make(chan struct{}, 4096), rate: rate, stop: make(chan struct{})}
+	go l.run()
+	return l
+}
+
+func (l *RateLimiter) run() {
+	const tick = 25 * time.Millisecond
+	t := time.NewTicker(tick)
+	defer t.Stop()
+	var acc float64 // fractional token accumulator (handles low rates)
+	for {
+		select {
+		case <-l.stop:
+			return
+		case <-t.C:
+			r := l.rate()
+			if r <= 0 {
+				// Unlimited: new Wait() callers short-circuit, but a worker already
+				// blocked on <-l.ch (from when a rate WAS set) won't re-check the
+				// rate until it receives a token — so keep the bucket topped up to
+				// release them promptly.
+				acc = 0
+				for i := 0; i < cap(l.ch); i++ {
+					select {
+					case l.ch <- struct{}{}:
+					default:
+						i = cap(l.ch)
+					}
+				}
+				continue
+			}
+			acc += float64(r) * tick.Seconds()
+			n := int(acc)
+			acc -= float64(n)
+			for i := 0; i < n; i++ {
+				select {
+				case l.ch <- struct{}{}:
+				default: // bucket full: cap the burst, drop the surplus
+					acc = 0
+					i = n
+				}
+			}
+		}
+	}
+}
+
+// Wait blocks for a token, unless the rate is unlimited (returns immediately) or
+// ctx is done.
+func (l *RateLimiter) Wait(ctx context.Context) {
+	if l.rate() <= 0 {
+		return
+	}
+	select {
+	case <-l.ch:
+	case <-ctx.Done():
+	}
+}
+
+// Close stops the token producer.
+func (l *RateLimiter) Close() { close(l.stop) }
