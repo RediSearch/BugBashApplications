@@ -1,0 +1,23 @@
+{
+  "params": {
+    "dataset": "gist-960-euclidean",
+    "experiment": "redis-m-16-ef-64",
+    "engine": "redis",
+    "parallel": 1,
+    "search_params": {
+      "ef": 512
+    }
+  },
+  "results": {
+    "total_time": 36.8265745829558,
+    "mean_time": 0.03660352200979833,
+    "mean_precisions": 0.96394,
+    "std_time": 0.005411315856846923,
+    "min_time": 0.031047416967339814,
+    "max_time": 0.1633058749139309,
+    "rps": 27.154303959153,
+    "p50_time": 0.035773979499936104,
+    "p95_time": 0.0423198003671132,
+    "p99_time": 0.05019083790015429
+  }
+}
