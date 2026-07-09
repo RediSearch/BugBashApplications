@@ -98,4 +98,11 @@ pip install -r requirements.txt
 
 ## Findings
 
-_TBD — will be filled during the bug bash._
+- **Smoke (100k docs, 5 min mixed, cloud Flex DB, 2026-07-09):** clean — load at
+  ~8.7k docs/s, ~86k churn+storm ops, zero correctness failures (no stale hits,
+  no content mismatches, all visibility probes passed), zero timeouts.
+- **Quoted phrase containing a default stopword is a query syntax error** —
+  `FT.SEARCH idx '"dize no"'` → `SEARCH_SYNTAX Syntax error at offset 6 near no`.
+  Likely inherited engine behavior rather than disk-specific (stopwords are
+  dropped at indexing), but worth confirming against a RAM index. The generator
+  now excludes stopwords from its vocabulary.

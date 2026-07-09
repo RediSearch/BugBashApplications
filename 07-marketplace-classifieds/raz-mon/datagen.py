@@ -24,6 +24,15 @@ SYLLABLES = [
     "vo", "za", "ze", "zu", "cha", "sha", "tra", "pla", "gra", "sta", "bri", "clo",
 ]
 
+# Default RediSearch stopwords: they are dropped at indexing time, and a quoted
+# phrase containing one is a query syntax error — keep them out of the vocab.
+# The 'x' suffix cannot collide with another generated word (syllables end in
+# vowels), so the mapping stays bijective.
+STOPWORDS = frozenset(
+    "a is the an and are as at be but by for if in into it no not of on or "
+    "such that their then there these they this to was will with".split()
+)
+
 CONDITIONS = ["new", "like_new", "good", "fair", "for_parts"]
 CONDITION_WEIGHTS = [0.15, 0.20, 0.35, 0.20, 0.10]
 
@@ -62,7 +71,8 @@ def word_from_index(i: int) -> str:
         i -= 1  # so lengths nest without collisions
         parts.append(SYLLABLES[i % n])
         i //= n
-    return "".join(reversed(parts))
+    w = "".join(reversed(parts))
+    return w + "x" if w in STOPWORDS else w
 
 
 def _name_list(count: int, salt: str, suffixes: list[str]) -> list[str]:
