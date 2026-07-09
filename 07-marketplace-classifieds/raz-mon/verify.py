@@ -45,7 +45,7 @@ def _read_doc(client, key: str, v_idx: int) -> dict | None:
 def _seller_keys(client, v_idx: int, seller: str) -> list:
     reply = client.execute_command(
         "FT.SEARCH", index_name(v_idx), f"@seller:{{{seller}}}",
-        "NOCONTENT", "LIMIT", "0", "500")
+        "NOCONTENT", "LIMIT", "0", "500", "TIMEOUT", "25000")
     return reply_keys(reply)
 
 

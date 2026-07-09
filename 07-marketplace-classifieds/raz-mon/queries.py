@@ -130,4 +130,7 @@ class QueryMix:
         name = rng.choices(self._names, self._weights)[0]
         args = self._fns[name](rng, v_idx)
         args[1] = index_name(v_idx)
+        # 25s server-side budget (< the 30s client socket_timeout), so slow
+        # disk queries complete instead of failing with SEARCH_TIMEOUT.
+        args += ["TIMEOUT", "25000"]
         return name, v_idx, args
