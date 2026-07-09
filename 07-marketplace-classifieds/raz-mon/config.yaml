@@ -1,0 +1,49 @@
+# bazaar — marketplace churn stress app for Redis Search on Disk (MS2).
+# Redis connection. Every value can be overridden on the CLI (--host, --port, ...)
+# or via env vars BAZAAR_HOST / BAZAAR_PORT / BAZAAR_PASSWORD / BAZAAR_TLS.
+redis:
+  host: localhost
+  port: 6379
+  password: null
+  tls: false
+  tls_ca: null          # path to a CA bundle for TLS endpoints, if needed
+
+# Which scale profile to use by default; override with --profile.
+profile: smoke
+
+profiles:
+  smoke:                # quick end-to-end sanity run (~200MB of docs)
+    total_docs: 100_000
+    vocab_size: 50_000
+    num_sellers: 4_000
+    load_workers: 4
+    churn_workers: 2
+    churn_ops_per_sec: 200      # total across all churn workers
+    storm_workers: 4
+  full:                 # the real thing: ~100GB of docs
+    total_docs: 50_000_000
+    vocab_size: 1_000_000       # unique TEXT terms are pinned RAM (~100MB/1M) — capped on purpose
+    num_sellers: 2_000_000      # high-cardinality TAG; each seller owns ~25 docs
+    load_workers: 16
+    churn_workers: 8
+    churn_ops_per_sec: 3_000
+    storm_workers: 16
+
+doc:
+  description_words: 200        # ~2KB/doc total
+
+churn:
+  insert_pct: 30
+  update_pct: 40
+  delete_pct: 30                # insert ≈ delete + TTL-expiry keeps the population roughly flat
+  ttl_fraction: 0.10            # fraction of new listings written with a TTL (continuous expiry stream)
+  ttl_min_s: 3600
+  ttl_max_s: 86400
+
+storm:
+  limit: 10                     # page size for FT.SEARCH
+  max_offset: 5000              # bound deep pagination (OOM guardrail is pre-query only)
+
+seed: 20260709
+out_dir: out                    # per-run metrics land in out/<run-id>/*.jsonl
+state_dir: state                # loader/churn checkpoints (resumability)

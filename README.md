@@ -39,6 +39,7 @@ so there are no collisions.
 | 4 | Image / media similarity | JSON or HASH | [`04-image-media-similarity/`](04-image-media-similarity/) |
 | 5 | Multilingual news / article archive | JSON | [`05-multilingual-news-archive/`](05-multilingual-news-archive/) |
 | 6 | Chat / messaging with retention | HASH | [`06-chat-messaging-retention/`](06-chat-messaging-retention/) |
+| 7 | Marketplace / classifieds with churn | HASH + JSON | [`07-marketplace-classifieds/`](07-marketplace-classifieds/) |
 
 ## How to contribute an application
 
