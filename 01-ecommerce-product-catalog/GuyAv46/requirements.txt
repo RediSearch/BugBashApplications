@@ -1,0 +1,4 @@
+redis>=5.0
+numpy>=1.26
+# Optional, only if RIDE_TIDE_REAL_EMBEDDINGS=1:
+# sentence-transformers>=2.7
