@@ -102,7 +102,7 @@ def churn_worker(worker: int, cfg: Config, run_dir: Path, duration: float | None
         except Exception as e:
             stats.record(op, (time.perf_counter() - t0) * 1000, error=True,
                          timeout=classify_error(e) == "timeout")
-            stats.event("churn_error", op=op, error=str(e)[:300])
+            stats.event("churn_error", failed_op=op, error=str(e)[:300])
             if classify_error(e) == "connection":
                 time.sleep(1.0)
                 client = make_client(cfg)

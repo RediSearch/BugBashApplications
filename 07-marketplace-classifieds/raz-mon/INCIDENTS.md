@@ -138,6 +138,65 @@ Different failure mode from incidents 1–2:
   `INFO keyspace` line is byte-identical across 25 min — even `expires` and
   `avg_ttl` frozen — so it is a **stale cached snapshot**, not a live
   single-shard view. Per-key R/W still healthy throughout.
+- 10:44: first movement in 40 min — the INFO snapshot ticked once
+  (keys +4,863 with zero client traffic; resync?), then froze again.
+  11:04, 11:12: still refusing FT.SEARCH. **~2h+ wedged.**
+- **11:15 — traffic restarted on Raz's call** (`out/mixed-full-t25b/`, then
+  `t25c` after a harness fix, see below): 8 churn + 16 storm + 2 verify.
+  Churn writes mostly fine (60–70ms) but a fraction hit 30s socket timeouts;
+  storm queries all fail fast on the topology error (~300k+ errors logged in
+  the first minutes — the refusal path itself is at least cheap/stable).
+- **11:30 — keyspace partially unreachable, quantified:** probing 30
+  spread-out keys with a 3s budget: 27 answered instantly, **3 hung (~10%)**.
+  So per-key ops to ~1 shard's worth of slots hang indefinitely; everything
+  else is fast. Explains churn's intermittent 30s timeouts and DBSIZE
+  hanging (fan-out touches the dead slice), and means "writes are healthy"
+  was only ~90% true.
+
+- 12:15: still wedged (**3h10m**). t25c interim: churn running with
+  intermittent 30s socket timeouts (the ~10% dead slice); storm
+  **4,730,343 queries, 100% errors**; verifiers: 392 `verify_error`
+  (all search-leg timeouts/refusals), **0 correctness events**.
+- 12:20 harness ops note: the fail-fast error loop wrote ~1.7GB of identical
+  `query_error` lines and nearly filled the box's disk (99%). Storm error
+  events are now sampled (first 5 per template+class, then every 500th) with
+  a 100ms backoff on sub-50ms failures; error *counts* remain exact in the
+  window stats. Spam-era run dirs t25b/t25c deleted (summaries salvaged in
+  `out/mixed-full-t25c-salvage/`), run relaunched as `mixed-full-t25d`.
+
+- 12:51 / 13:21 / 13:52 / 14:23 checks: unchanged — FT.SEARCH refused,
+  DBSIZE hung. **5h15m+ wedged.** t25d traffic (throttled storm + churn +
+  verifiers) running stable throughout; disk steady at ~4.8G free.
+
+- 14:54 / 15:21: unchanged. **6h15m+ wedged.**
+- 15:25: second churn fleet launched (`out/churn-extra/`, +8 workers, 3h) to
+  raise write pressure. Measured effect: **effective churn throughput is
+  ~2–3 ops/s per fleet, not the 3k target** — ~10% of ops land on the dead
+  slice and block for the full 30s socket timeout, so the average op costs
+  ~3s and workers serialize (0.9×70ms + 0.1×30s). I.e. the wedge also
+  collapses *write* throughput ~1000× for clients touching random keys,
+  even though 90% of individual writes are fast.
+
+- 15:45 responsiveness matrix (all verified with unique-nonce round trips,
+  live socket inspection, and read-back of a churn-inserted doc):
+  PING instant; per-key R/W instant on ~80–90% of keys; per-key ops on the
+  dead slice (4/20 sampled) hang to client timeout; DBSIZE/FT.INFO hang;
+  FT.SEARCH/FT.AGGREGATE fail instantly with the topology error.
+- 15:57: unchanged. **~6h50m wedged.**
+- **16:05 — all client traffic and watchers stopped (end of session).**
+  Incident 3 was still open at stop time: FT.SEARCH had been unavailable
+  since ~09:10 UTC (~7h), never self-recovered. Final state of the test:
+  35.31M docs loaded, indexes intact per last consistent read (35.27M
+  num_docs == dbsize at 08:59), wedge unresolved — needs cluster-side
+  diagnosis (rladmin status / event logs for c127261, window 09:05–09:40).
+
+### Harness bug found by incident 3 (fixed, not a DB issue)
+
+All 8 churn workers died on their *first* op error:
+`stats.event("churn_error", op=op, ...)` collided with `event()`'s positional
+`op` arg → `TypeError` → worker crash. Never triggered before because churn
+had a clean run until this incident. Fixed (`failed_op=`), run relaunched as
+`mixed-full-t25c`; churn now survives errors and logs them.
 
 ### Mixed-run health snapshots
 
