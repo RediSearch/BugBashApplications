@@ -15,4 +15,5 @@ username, then build your app inside it.
 
 | Contributor | Notes |
 | ----------- | ----- |
+| [`fcenedes/vecdb_bench/`](fcenedes/vecdb_bench/) | Redis-only fork of [vector-db-benchmark](https://github.com/redis-performance/vector-db-benchmark) adapted for **Redis Flex (disk-backed HNSW)** beta. Single config; run with `poetry run ./run_bench.py`, view results with dashboard v2. |
 | _add yourself_ | |
