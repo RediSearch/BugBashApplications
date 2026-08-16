@@ -72,11 +72,13 @@ func (r *Runner) Run(ctx context.Context) {
 	editLim := NewLimiter(r.cfg.Edit.Rate)
 	delLim := NewLimiter(r.cfg.Delete.Rate)
 	slideLim := NewLimiter(r.cfg.Sliding.Rate)
+	queryLim := NewRateLimiter(r.ctrl.QueryRate) // shared, live-rate token bucket
 	defer func() {
 		ingestLim.Close()
 		editLim.Close()
 		delLim.Close()
 		slideLim.Close()
+		queryLim.Close()
 	}()
 
 	for i := 0; i < r.cfg.Ingest.Workers; i++ {
@@ -84,9 +86,9 @@ func (r *Runner) Run(ctx context.Context) {
 		go func(id int) { defer wg.Done(); r.ingester(ctx, id, ingestLim) }(i)
 	}
 	// A supervisor spawns/stops query workers to match the live concurrency
-	// (threads) set from the UI; each self-paces to the live rate.
+	// (threads); all share queryLim so the aggregate rate is honored.
 	wg.Add(1)
-	go func() { defer wg.Done(); r.querySupervisor(ctx) }()
+	go func() { defer wg.Done(); r.querySupervisor(ctx, queryLim) }()
 
 	wg.Add(3)
 	go func() { defer wg.Done(); r.editor(ctx, editLim) }()
@@ -179,7 +181,7 @@ func (r *Runner) ingester(ctx context.Context, id int, lim *Limiter) {
 
 // querySupervisor keeps the number of live query workers equal to the control's
 // concurrency setting, spawning new workers or cancelling extras as it changes.
-func (r *Runner) querySupervisor(ctx context.Context) {
+func (r *Runner) querySupervisor(ctx context.Context, lim *RateLimiter) {
 	var workers []context.CancelFunc
 	var wwg sync.WaitGroup
 	nextID := 0
@@ -190,7 +192,7 @@ func (r *Runner) querySupervisor(ctx context.Context) {
 		id := nextID
 		nextID++
 		wwg.Add(1)
-		go func() { defer wwg.Done(); r.queryer(wctx, id) }()
+		go func() { defer wwg.Done(); r.queryer(wctx, id, lim) }()
 	}
 	shrink := func() {
 		last := len(workers) - 1
@@ -221,7 +223,7 @@ func (r *Runner) querySupervisor(ctx context.Context) {
 	}
 }
 
-func (r *Runner) queryer(ctx context.Context, id int) {
+func (r *Runner) queryer(ctx context.Context, id int, lim *RateLimiter) {
 	rnd := rand.New(rand.NewSource(r.cfg.Seed*53 + int64(id)*17 + 3))
 	slowMs := r.cfg.Query.SlowMs
 	iter := 0
@@ -233,7 +235,7 @@ func (r *Runner) queryer(ctx context.Context, id int) {
 			sleepCtx(ctx, 200*time.Millisecond)
 			continue
 		}
-		r.paceQuery(ctx)
+		lim.Wait(ctx) // shared token bucket: delivers the configured aggregate rate
 
 		item, ok := r.ctrl.PickPooled(rnd.Int())
 		if !ok {
@@ -312,27 +314,6 @@ func (r *Runner) regenPool() {
 
 func sleepCtx(ctx context.Context, d time.Duration) {
 	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-t.C:
-	case <-ctx.Done():
-	}
-}
-
-// paceQuery self-throttles a query worker to (liveRate / liveConcurrency) qps,
-// reading both live so the UI can change rate and thread count at runtime.
-// rate <= 0 means unlimited (load is then bounded only by the thread count).
-func (r *Runner) paceQuery(ctx context.Context) {
-	rate := r.ctrl.QueryRate()
-	workers := r.ctrl.Concurrency()
-	if rate <= 0 || workers <= 0 {
-		return
-	}
-	interval := time.Duration(int64(time.Second) * int64(workers) / int64(rate))
-	if interval <= 0 {
-		return
-	}
-	t := time.NewTimer(interval)
 	defer t.Stop()
 	select {
 	case <-t.C:

@@ -1,5 +1,16 @@
 # Build output and run artifacts (also covered by the repo-root .gitignore).
+# NOTE: anchor the binary name with a leading slash — a bare `chatstress`
+# pattern also matches the cmd/chatstress/ source directory and silently
+# excludes main.go from git.
 /bin/
 /out/
-chatstress
+/chatstress
 flexdata/
+
+# Secrets — cloud connection URLs live here and must NEVER be committed.
+# (.env.example is the committed placeholder.)
+.env
+.env.*
+!.env.example
+config/local.yaml
+config/*.local.yaml
